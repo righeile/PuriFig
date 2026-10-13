@@ -1,0 +1,10 @@
+# Upper bounds are the majors that are known to break this code, not caution:
+# see ../requirements-apps.txt, which is the environment these apps actually
+# run in (one shared .venv, symlinked as .venv in each app).
+flask>=3.0,<4
+numpy>=1.24,<3
+scipy>=1.10,<2
+pillow>=10.0,<13
+tifffile>=2026.9.20            # shared env; the czifile 2019 ceiling is gone
+biopython>=1.81
+pypdf>=5                       # the figure PDF: Chrome prints it, pypdf makes the page box exact

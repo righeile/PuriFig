@@ -1,0 +1,29 @@
+# The shared environment, symlinked in (no trailing slash: git sees the symlink
+# as a file).  Every app here runs on Apps/.venv-apps.
+.venv
+
+# Byte-code and tooling caches.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Editor and assistant config, specific to one machine.
+.claude/
+.vscode/
+.idea/
+
+# OS clutter.
+.DS_Store
+Thumbs.db
+
+# A copy of a file taken by hand before a risky edit.
+.bak-*/
+
+# The example scans and traces are *built* by the three scripts beside them,
+# each from a fixed seed, so a clone makes its own in a second rather than
+# carrying thirteen megabytes of TIFF around.  The NanoDrop exports are real
+# files and stay.
+examples/example_gel.tif
+examples/example_sec.asc
+examples/example_sec.csv
+examples/western/

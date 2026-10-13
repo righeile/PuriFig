@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PuriFig — protein purification figure canvas</title>
+<link rel="stylesheet" href="labkit.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header id="toolbar">
+  <span class="brand">Puri<em>Fig</em><small class="brand-by">by Matrix MetalloProteinase</small></span>
+
+  <div class="group">
+    <button data-add="gel"   title="Gel panel (G)">Gel</button>
+    <button data-add="blot"  title="Western blot — the signal and its white-light image (W)">Blot</button>
+    <button data-add="chrom" title="Chromatogram panel (C)">Chrom</button>
+    <button data-add="table" title="Purification table (P)">Table</button>
+    <button data-add="nanodrop" title="A280 concentration table — NanoDrop or typed (D)">A₂₈₀</button>
+    <button data-add="quant" title="Quantification — bands measured on replicate blots, normalized (Q)">Quant</button>
+    <button data-add="construct" title="Construct diagram — tags, protease sites and truncations, to scale in residues (S)">Construct</button>
+    <button data-add="box"   title="Scheme box (N)">Box</button>
+    <button data-add="text"  title="Free text (T)">Text</button>
+    <button data-add="panel" title="Panel letter (A)">A</button>
+  </div>
+
+  <div class="group">
+    <button data-connect="arrow" title="Straight arrow (1)">→</button>
+    <button data-connect="elbow" title="Elbow connector (2)">⌐</button>
+    <button data-connect="brace" title="Tie pooled fractions to gel lanes (3)">⊐</button>
+  </div>
+
+  <div class="group">
+    <label>Page
+      <select id="preset"></select>
+    </label>
+    <input id="pageW" type="number" step="1" min="20" max="500" title="width mm"> ×
+    <input id="pageH" type="number" step="1" min="20" max="500" title="height mm"> mm
+  </div>
+
+  <div class="group">
+    <label class="chk"><input id="snap" type="checkbox" checked> snap</label>
+    <label class="chk"><input id="grid" type="checkbox" checked> grid</label>
+    <label class="chk" title="Hide the luminescence and show the white-light image underneath it — hold H, or tick to keep it off. The figure and the export are unchanged."><input id="peekWhite" type="checkbox"> white light</label>
+    <button id="fit" title="Zoom to fit (0)">fit</button>
+    <button id="sheet" title="Showing the figure — click for the supplementary sheet of whole blots">figure</button>
+    <span id="zoomLabel">100%</span>
+  </div>
+
+  <div class="group right">
+    <span id="sessionName" class="sess" title="not saved to a file yet">untitled</span>
+    <button id="new" title="Start an empty figure">New</button>
+    <button id="example">Example</button>
+    <button id="open" title="Open a saved session (⌘O)">Open…</button>
+    <button id="save" title="Save the session, over the file it came from (⌘S)">Save</button>
+    <button id="saveAs" title="Save the session under another name (⇧⌘S)">as…</button>
+    <select id="recent" title="Sessions saved or opened recently"></select>
+  </div>
+
+  <div class="group" id="exportGroup">
+    <button id="integrity" title="Every crop, window, splice and excision in this figure">Integrity…</button>
+    <button id="caption" title="Draft the figure legend from the panel metadata">Caption…</button>
+    <button id="methods" title="Draft the methods paragraph: how the blots were quantified">Methods…</button>
+    <button id="protocol" title="The purification protocol: import the Word file, edit it, export it with the figure">Protocol…</button>
+    <button id="expPdf" class="primary" title="The figure as a vector PDF — labels still text, scans embedded">PDF</button>
+    <button id="expSvg" title="The same figure as SVG, for Illustrator">SVG</button>
+    <button id="expPng">PNG</button>
+    <button id="expSource" title="The uncropped scans, with the crop regions marked — the supplementary sheet journals ask for">Source data</button>
+    <select id="dpi" title="raster export resolution">
+      <option>300</option><option selected>600</option><option>1200</option>
+    </select>
+    <span id="backend" class="dot" title="backend status">●</span>
+  </div>
+</header>
+
+<div id="hint"></div>
+
+<main>
+  <div id="stage">
+    <svg id="canvas" xmlns="http://www.w3.org/2000/svg"></svg>
+    <div id="dropveil">drop a gel, a blot, or a chromatogram export</div>
+  </div>
+  <aside id="inspector"><div class="empty">Nothing selected.</div></aside>
+</main>
+
+<div id="modal" class="modal" hidden>
+  <div class="modal-box">
+    <div class="modal-head">
+      <h2 id="modalTitle">—</h2>
+      <span class="spacer"></span>
+      <button id="modalCopy" class="ghost small">Copy</button>
+      <button id="modalSave" class="ghost small">Save…</button>
+      <button id="modalClose" class="primary small">Close</button>
+    </div>
+    <div id="modalBody" class="modal-body"></div>
+  </div>
+</div>
+
+<input id="fileJson"  type="file" accept=".json,application/json" hidden>
+<input id="fileImage" type="file" accept="image/*" hidden>
+<input id="fileMarker" type="file" accept="image/*" hidden>
+<input id="fileTrace" type="file" accept=".res,.RES,.asc,.txt,.csv,.tsv,.xls" hidden>
+
+<script src="labkit.js"></script>
+<script src="protein.js"></script>
+<script src="panels.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

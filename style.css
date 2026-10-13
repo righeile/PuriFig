@@ -1,0 +1,232 @@
+/* purifig -- only what is particular to this app.
+ *
+ * The palette, buttons, inputs, toolbar, modal and inspector chrome come from
+ * labkit.css, which is loaded first.  What is left is the canvas, the floating
+ * text editor, the levels histogram, and the inspector's own rows.
+ */
+
+body { overflow: hidden; display: flex; flex-direction: column; }
+
+/* ---------- toolbar ---------- */
+#toolbar { min-height: 40px; padding: 7px 12px; flex-wrap: wrap; }
+.brand { letter-spacing: .04em; }   /* two-tone from labkit.css: the <em> is the red one */
+label { display: flex; align-items: center; gap: 4px; }
+label.chk { cursor: pointer; }
+
+#toolbar input[type=number] { width: 58px; cursor: text; }
+#toolbar select { width: auto; }
+button.primary { background: var(--accent-deep); border-color: var(--accent-edge); }
+
+#hint {
+  flex: 0 0 auto; padding: 0 12px; height: 0; overflow: hidden;
+  background: var(--accent-deep); color: var(--on-accent); font-weight: 500;
+  transition: height .12s ease;
+}
+#hint.show { height: 26px; line-height: 26px; }
+#hint.warn { background: var(--warn); color: var(--on-status); }
+
+/* ---------- layout ---------- */
+main { flex: 1 1 auto; display: flex; min-height: 0; }
+#stage { flex: 1 1 auto; position: relative; overflow: hidden; background: var(--canvas); }
+#canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+#canvas.panning { cursor: grab; }
+#canvas.connecting { cursor: crosshair; }
+#canvas.picking { cursor: crosshair; }
+
+#dropveil {
+  position: absolute; inset: 12px; border: 2px dashed var(--accent);
+  border-radius: 8px; display: none; place-items: center;
+  color: var(--accent); font-size: 15px; letter-spacing: .05em;
+  background: var(--accent-veil); pointer-events: none;
+}
+#dropveil.show { display: grid; }
+
+/* ---------- inspector ---------- */
+#inspector {
+  flex: 0 0 268px; background: var(--panel); border-left: 1px solid var(--line);
+  overflow-y: auto; padding: 10px;
+}
+#inspector .empty { color: var(--faint); padding: 6px 2px; }
+.row > label { flex: 0 0 66px; font-size: 11px; }
+.row > input, .row > select, .row > textarea { flex: 1 1 auto; min-width: 0; }
+.row.tight > label { flex: 0 0 auto; }
+.btnrow { display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 6px; }
+.btnrow button { flex: 1 1 auto; padding: 4px 6px; }
+#inspector .status { font-size: 10.5px; margin: 4px 0 8px; line-height: 1.45; }
+#inspector h3 { text-transform: none; }
+
+/* A disclosure for the parts of a panel most figures never touch, so that the
+   twelve controls a gel actually needs are not buried under the forty it can
+   have. */
+details.fold { border-top: 1px solid var(--line); margin: 8px -10px 0; padding: 6px 10px 0; }
+details.fold > summary {
+  cursor: pointer; color: var(--dim); font-size: 11px; letter-spacing: .04em;
+  text-transform: uppercase; list-style: none; padding: 2px 0 6px;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '▸ '; color: var(--faint); }
+details.fold[open] > summary::before { content: '▾ '; }
+details.fold > summary:hover { color: var(--ink); }
+
+/* ---------- lane list ---------- */
+/* One row per lane, in gel order.  The role select is what drives the
+   rendering: 'ladder' gets the size marks, 'excised' takes the lane out and
+   puts a splice mark where it was. */
+.lanes { display: flex; flex-direction: column; gap: 2px; margin-bottom: 6px; }
+.lane {
+  display: flex; align-items: center; gap: 4px; padding: 2px 3px;
+  border: 1px solid transparent; border-radius: 3px; background: var(--field);
+}
+.lane.on { border-color: var(--accent); background: var(--accent-wash); }
+.lane .n {
+  flex: 0 0 17px; text-align: right; color: var(--faint);
+  font-family: var(--mono); font-size: 10.5px;
+}
+.lane input.lbl { flex: 1 1 auto; min-width: 0; font-size: 11px; padding: 2px 4px; }
+.lane select { flex: 0 0 82px; font-size: 10.5px; padding: 1px 2px; }
+.lane.cut input.lbl { text-decoration: line-through; color: var(--faint); }
+.lane.cut { opacity: .62; }
+
+/* A construct's segments: name, residues, first residue number, color, cut,
+   sequence and remove, in the width the inspector has.  Laid out here rather
+   than squeezed by the generic rule, which gave the flexible name field twelve
+   pixels once six fixed controls had taken their share. */
+.lane.seg { gap: 3px; }
+.lane.seg input.lbl:not(.num) { min-width: 46px; }
+.lane.seg input.lbl.num { flex: 0 0 36px; }
+.lane.seg input.lbl[readonly] { color: var(--faint); }
+.lane.seg input[type="color"] { flex: 0 0 20px; width: 20px; height: 18px; padding: 0; border-radius: 2px; }
+.lane.seg button { flex: 0 0 auto; padding: 1px 4px; font-size: 10.5px; line-height: 1.5; }
+.lane.seg button.on { background: var(--accent-deep); border-color: var(--accent-edge); }
+
+/* ---------- levels histogram ---------- */
+.hist {
+  position: relative; height: 46px; background: var(--field);
+  border: 1px solid var(--line); border-radius: 3px; margin-bottom: 6px;
+  overflow: hidden; cursor: ew-resize;
+}
+.hist canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.hist .knob {
+  position: absolute; top: 0; bottom: 0; width: 1px; background: var(--accent);
+}
+.hist .knob::after {
+  content: ''; position: absolute; top: 0; left: -3px; width: 7px; height: 5px;
+  background: var(--accent);
+}
+.hist .clip { position: absolute; top: 0; bottom: 0; background: rgba(255,107,107,.22); }
+
+/* ---------- badges in the inspector ---------- */
+.flags { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 7px; }
+
+/* ---------- inline text editor ---------- */
+/* White on purpose: it edits text that will be drawn on a white figure, so it
+   shows the text as it will appear rather than as the interface. */
+#editor {
+  position: absolute; z-index: 50; display: none;
+  background: #fff; color: #000; border: 1.5px solid var(--accent);
+  border-radius: 2px; padding: 2px; margin: 0;
+  /* FONT in panels.js, the family every <text> is written with: what you
+     type is what is rendered. Change them together. */
+  font-family: Arial, Helvetica, sans-serif; text-align: center;
+  resize: none; overflow: hidden; line-height: 1.18;
+}
+
+/* ---------- status dot ---------- */
+.dot { font-size: 14px; color: var(--faint); width: auto; height: auto; border-radius: 0; }
+.dot.up   { color: var(--ok); }
+.dot.down { color: var(--bad); }
+
+/* ---------- modal ---------- */
+/* Scoped to purifig's own report modal.  labkit's file dialog uses these same
+   class names, and an unscoped rule here turned its body from a clipping flex
+   box into a block one — so the folder list grew to its full height, ran off
+   the bottom of the dialog and off the screen, and the dialog looked as though
+   it could not see folders at all. */
+#modal .modal-body { padding: 12px; overflow: auto; display: block; }
+#modal .modal-body pre {
+  margin: 0; white-space: pre-wrap; font-family: var(--mono); font-size: 12px;
+  line-height: 1.55; color: var(--ink);
+}
+#modal .modal-body .sheet { background: #fff; padding: 10px; border-radius: 4px; }
+#modal .modal-body .sheet img { max-width: 100%; display: block; }
+
+/* ---------- A280 table panel ---------- */
+/* The derived numbers, read-only beside the ones you typed: the point is that
+   you can see mg/mL change as you correct a dilution, without it ever being a
+   field anybody can overwrite by hand. */
+.lane input.lbl.num { flex: 0 0 52px; text-align: right; }
+.lane .derived, .row .derived {
+  flex: 0 0 auto; min-width: 62px; text-align: right; white-space: nowrap;
+  font-size: 10.5px; color: var(--dim, #8a8a8a); font-variant-numeric: tabular-nums;
+}
+.note.warn {
+  border-left: 2px solid var(--warn, #b8860b);
+  padding-left: 6px; color: var(--ink);
+}
+/* The sequence read-out: label and value in two columns, numbers aligned. */
+.kv {
+  display: grid; grid-template-columns: auto 1fr; gap: 1px 8px;
+  margin: 5px 0 7px; font-size: 11px;
+}
+.kv span { color: var(--faint, #8a8a8a); }
+.kv b { font-weight: 500; font-variant-numeric: tabular-nums; }
+
+/* ---------- cropping ---------- */
+/* The panel shows the whole scan while you drag its outline, so the canvas says
+   plainly that it is in a different mode and not simply redrawn wrong. */
+#canvas.cropping { cursor: crosshair; }
+#canvas.cropping .handle, #canvas.cropping .lanehit, #canvas.cropping .lanedge { display: none; }
+
+/* ---------- the session ---------- */
+/* Which file this is and whether it is behind — the two things you want to
+   know before closing a laptop, said in the corner rather than in a dialog. */
+#sessionName {
+  font-family: var(--mono); font-size: 11px; color: var(--dim);
+  max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 0 2px;
+}
+#sessionName.dirty { color: var(--accent); }
+#toolbar #recent { width: auto; max-width: 92px; font-size: 11px; }
+
+/* An offer in the status bar — restoring an autosave — needs a button, and
+   must not time out before it is read. */
+button.hintact {
+  background: var(--on-accent); color: var(--accent-deep); border: 0;
+  border-radius: 3px; padding: 1px 8px; margin-left: 4px;
+  font-size: 11px; font-weight: 600; cursor: pointer; vertical-align: 1px;
+}
+button.hintact.ghost { background: transparent; color: inherit; text-decoration: underline; }
+
+/* ---------- quantifying ---------- */
+/* A row's color is the color of its boxes on the canvas, so the swatch is how
+   the list and the picture are read against each other. */
+.lane .swatch { flex: 0 0 9px; height: 9px; border-radius: 2px; margin-left: 3px; }
+.lane .lbl.grow {
+  flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 11px; padding: 2px 4px;
+}
+.lane button { flex: 0 0 auto; padding: 1px 6px; }
+.lane select.role { flex: 0 0 64px; }
+.lane .derived.tight { min-width: 0; }
+/* The numbers, in a table that scrolls sideways rather than squeezing a column
+   of measurements into ellipses. */
+.qtable { overflow-x: auto; margin: 4px 0 8px; }
+.qtable table { border-collapse: collapse; font-size: 10.5px; font-variant-numeric: tabular-nums; }
+.qtable th, .qtable td { padding: 2px 5px; text-align: right; white-space: nowrap; }
+.qtable th { color: var(--dim); font-weight: 500; border-bottom: 1px solid var(--line); }
+.qtable td:first-child, .qtable th:first-child { text-align: left; }
+.qtable td.n { color: var(--faint); font-family: var(--mono); }
+.qtable td.dim { color: var(--faint); }
+.qtable b.bad { color: var(--bad); font-weight: 600; }
+.qtable b.warn { color: var(--warn); font-weight: 600; }
+#inspector select#qnAddGel { flex: 1 1 auto; min-width: 0; font-size: 11px; }
+
+/* The quantification panel's color scheme, shown as the order the conditions
+   take it in.  labkit.css has swatches too, but scoped to its plot panel. */
+#inspector .swatches { display: flex; gap: 3px; align-items: center; flex-wrap: wrap; }
+#inspector .sw { width: 13px; height: 13px; border-radius: 2px; border: 1px solid rgba(0,0,0,.25); }
+
+/* ---- the protocol, edited as text ---- */
+
+.prot-bar { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; }
+.prot-text { width: 100%; height: 52vh; line-height: 1.5; }

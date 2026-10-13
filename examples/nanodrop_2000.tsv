@@ -1,0 +1,6 @@
+Sample ID	User ID	Date and Time	Protein Conc.	Unit	A280 10mm	A260	260/280	260/230	Sample Type	Baseline Correction
+M38 IMAC eluate	prime	2026-09-04 22:10	0.412	mg/ml	0.412	0.253	0.61	1.98	1 Abs = 1 mg/ml	340 nm
+M38 SEC pool	prime	2026-09-04 23:05	0.187	mg/ml	0.187	0.112	0.60	2.11	1 Abs = 1 mg/ml	340 nm
+M51 IMAC eluate	prime	2026-09-05 00:02	1.204	mg/ml	1.204	0.735	0.61	2.05	1 Abs = 1 mg/ml	340 nm
+M51 SEC pool	prime	2026-09-05 01:20	0.556	mg/ml	0.556	0.341	0.61	2.09	1 Abs = 1 mg/ml	340 nm
+Buffer blank	prime	2026-09-05 01:22	0.002	mg/ml	0.002	0.001	0.50	0.12	1 Abs = 1 mg/ml	340 nm

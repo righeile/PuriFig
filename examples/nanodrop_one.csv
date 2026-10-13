@@ -1,0 +1,4 @@
+Sample Name,Date,A280 (Abs),A260 (Abs),A260/A280,Concentration (mg/mL),Dilution Factor
+M54 peak A,2026-09-05,0.318,0.194,0.61,0.318,1
+M54 peak B,2026-09-05,0.902,0.551,0.61,0.902,2
+M57 pool,2026-09-05,0.245,0.150,0.61,0.245,1
