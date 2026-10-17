@@ -61,6 +61,7 @@ __all__ = [
     "PlotSpec", "figure_from_spec", "comparisons_for", "annotate_from_spec",
     "PALETTES", "FONTS", "VECTOR_TEXT", "TIGHT_CROP",
     "MM", "jitter", "AXES_LENGTH_MM", "BOX_LW",
+    "series_names", "order_series", "reorder_data",
 ]
 
 SMALL, MEDIUM, LARGE = 7, 8, 9
@@ -755,19 +756,27 @@ def group_plot(
                             elinewidth=0.9, capthick=0.9,
                             ecolor=theme.PRINT["ink"], zorder=4)
         elif kind == "box":
+            # Black, like every other box in these apps (`PlotStyle.box_edge_colour`
+            # in pHerret, which is where the house style was settled).  A box is
+            # line art and line art is black; the series colour lives on the
+            # points drawn on top, which is the only place it has to be read.
+            # Drawn in the colour instead, the same data gives a different
+            # picture depending on which app drew it -- and two such panels end
+            # up side by side in one figure.
+            ink = theme.PRINT["ink"]
             box = ax.boxplot([values], positions=[x], widths=bar_width,
                              **(_SIDEWAYS if horizontal else {}),
                              patch_artist=True, showfliers=False, zorder=2,
-                             medianprops={"color": theme.PRINT["ink"], "lw": BOX_LW},
-                             whiskerprops={"color": colour, "lw": BOX_LW},
-                             capprops={"color": colour, "lw": BOX_LW})
+                             medianprops={"color": ink, "lw": BOX_LW},
+                             whiskerprops={"color": ink, "lw": BOX_LW},
+                             capprops={"color": ink, "lw": BOX_LW})
             for patch in box["boxes"]:
                 # Outline only.  A filled box competes with the points drawn on
                 # top of it for the same ink, and the points are the reason the
                 # figure exists -- with three or four animals a side, what the
                 # reader needs to see is where each one fell, not a tinted
                 # rectangle in front of them.
-                patch.set(facecolor="none", edgecolor=colour, linewidth=BOX_LW)
+                patch.set(facecolor="none", edgecolor=ink, linewidth=BOX_LW)
         elif kind == "violin":
             if values.size >= 3 and np.ptp(values) > 0:
                 parts = ax.violinplot([values], positions=[x], widths=bar_width,
@@ -783,12 +792,17 @@ def group_plot(
                             capsize=2.0, capthick=0.9,
                             ecolor=theme.PRINT["ink"], zorder=4)
         else:                                            # 'none': the center only
+            # The line is the summary shape, so it carries the series colour the
+            # way a bar's fill or a violin's body does.  The error bar does not:
+            # it is a whisker, and whiskers are black in all four kinds -- it
+            # was the series colour here alone, which made one plot kind quietly
+            # unlike its neighbours.
             ax.plot(*_pair([x - bar_width / 2.4, x + bar_width / 2.4], [height] * 2),
                     color=colour, lw=1.4, zorder=4, solid_capstyle="butt")
             if err:
                 ax.errorbar(*_pair(x, height), **{f"{val}err": err},
-                            fmt="none", elinewidth=0.9,
-                            capsize=2.5, capthick=0.9, ecolor=colour, zorder=4)
+                            fmt="none", elinewidth=0.9, capsize=2.5, capthick=0.9,
+                            ecolor=theme.PRINT["ink"], zorder=4)
 
     # --- the points, which are the point ----------------------------------
     offsets: dict[str, np.ndarray] = {}
@@ -1308,6 +1322,13 @@ class PlotSpec:
     #: names it mentions.  "KO is this red" is a decision about a paper, not
     #: about a palette, and it has to survive a figure gaining a group.
     colours: dict[str, str] = field(default_factory=dict)
+    #: The sequence the conditions are drawn in, ``["WT", "P716L", "Y715C"]``.
+    #: Empty leaves them in the order the data arrived, which for most callers
+    #: is alphabetical -- and alphabetical puts the wild type after the mutants.
+    #: Named by name, like :attr:`colours`, and for the same reason: an order
+    #: has to survive the figure gaining a condition.  :func:`order_series` says
+    #: what happens to a condition this does not mention.
+    order: list[str] = field(default_factory=list)
     width_mm: float = 85.0         # single column
     height_mm: float = 0.0         # 0 = derive from width
     #: The plotting area of one panel, labels *outside* it -- see
@@ -1500,6 +1521,55 @@ def series_names(data) -> list[str]:
     if isinstance(data, dict):
         return [str(k) for k in data]
     return [str(d.get("label", "") if isinstance(d, dict) else d) for d in data]
+
+
+def order_series(names, order) -> list[str]:
+    """``names`` put in the sequence ``order`` asks for, keeping the strangers.
+
+    The sequence a reader needs is almost never alphabetical: ``WT``, ``P716L``,
+    ``Y715C`` is the order of the mutation along the protein, and sorted() puts
+    the wild type last.  So the order is the user's to state, and this is the one
+    rule that applies it everywhere -- the figure, the colors, the brackets and
+    the legend all read the same list.
+
+    A name ``order`` does not mention keeps its place *after* the ones that are
+    mentioned, rather than disappearing: a saved order outlives the dataset it
+    was typed for, and the commonest thing to happen next is a new condition.
+    Dropping it silently would be a figure missing a genotype that nobody asked
+    to hide.  A name in ``order`` that is not in the data is simply skipped.
+    """
+    names = [str(n) for n in names]
+    if not order:
+        return names
+    want = [str(o) for o in order]
+    seen = set()
+    first = [n for n in want if n in names and not (n in seen or seen.add(n))]
+    return first + [n for n in names if n not in seen]
+
+
+def reorder_data(data, order):
+    """``data`` in the sequence :func:`order_series` gives, whatever shape it is.
+
+    ``{label: values}`` for the group kinds and ``[{'label': ...}, ...]`` for
+    the curve kinds, which is every shape :func:`figure_from_spec` takes.  Doing
+    it to the data once, before anything reads it, is what keeps the order out
+    of the drawing code: the colors are assigned by walking the series
+    (:func:`colours_for`), the positions by drawing them, and the brackets by
+    reading the positions back, so all three follow a reordered input without
+    knowing an order exists.  Passing an order to the drawing instead would have
+    left :func:`colours_for` walking the old sequence and quietly handed every
+    series its neighbour's color.
+    """
+    if not order:
+        return data
+    want = order_series(series_names(data), order)
+    if isinstance(data, dict):
+        return {k: data[k] for k in want if k in data}
+    at = {}
+    for item in data:
+        at.setdefault(str(item.get("label", "") if isinstance(item, dict) else item),
+                      []).append(item)
+    return [item for name in want for item in at.get(name, [])]
 
 
 def colours_for(spec: "PlotSpec | dict", data) -> list[str]:
@@ -1766,6 +1836,9 @@ def figure_from_spec(
     annotated, or ``None``.
     """
     spec = spec if isinstance(spec, PlotSpec) else PlotSpec.from_dict(spec)
+    # First, so that everything below -- the colors, the drawing order, the
+    # positions the brackets are hung from -- reads one sequence.
+    data = reorder_data(data, spec.order)
     palette = colours_for(spec, data)
     table = None
 

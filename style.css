@@ -83,7 +83,15 @@ details.fold > summary:hover { color: var(--ink); }
   font-family: var(--mono); font-size: 10.5px;
 }
 .lane input.lbl { flex: 1 1 auto; min-width: 0; font-size: 11px; padding: 2px 4px; }
+/* The artboard rows name the board on a button rather than in a field: it is
+   switched to, not typed into, and the lane's own `on` marks the one showing. */
+.lane button.lbl { flex: 1 1 auto; min-width: 0; font-size: 11px; text-align: left; }
 .lane select { flex: 0 0 82px; font-size: 10.5px; padding: 1px 2px; }
+/* How much of the sample went into the lane, in µL.  The role gives up some
+   width for it: a role is a menu and reads fine clipped, a label is typed. */
+.lane input.ul { flex: 0 0 34px; font-size: 10.5px; padding: 2px 3px; }
+.lane input.ul::placeholder { color: var(--faint); }
+.lanes.vol select { flex: 0 0 68px; }
 .lane.cut input.lbl { text-decoration: line-through; color: var(--faint); }
 .lane.cut { opacity: .62; }
 
@@ -187,6 +195,9 @@ details.fold > summary:hover { color: var(--ink); }
 }
 #sessionName.dirty { color: var(--accent); }
 #toolbar #recent { width: auto; max-width: 92px; font-size: 11px; }
+/* Which artboard is showing, beside the zoom: a figure is usually one canvas
+   and the switch should not look like a mode. */
+#toolbar #board { width: auto; max-width: 128px; font-size: 11px; }
 
 /* An offer in the status bar — restoring an autosave — needs a button, and
    must not time out before it is read. */
@@ -228,5 +239,101 @@ button.hintact.ghost { background: transparent; color: inherit; text-decoration:
 
 /* ---- the protocol, edited as text ---- */
 
-.prot-bar { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; }
+/* ---------- the protocol ---------- */
+/* A form that reads as the protocol it came from: the steps as written, each
+   with the field for what happened at it, and the recipe's own numbers marked
+   where a scale factor has moved them.  The comment fields carry the theme's
+   red because that is the color the same lines have in Word. */
+
+/* The sheet sits between the canvas and the inspector, the width of a column of
+   protocol.  Its body is paper -- white like the figure page beside it, with
+   the comments in the red they have in Word -- so the whole repaint is the few
+   variables redefined on .prot-body, which every rule below already reads. */
+#protsheet {
+  flex: 0 0 372px; min-width: 0; display: flex; flex-direction: column;
+  background: var(--panel); border-left: 1px solid var(--line); padding: 8px 9px;
+}
+#protsheet .prot { flex: 1 1 auto; min-height: 0; }
+#protsheet .prot-body {
+  flex: 1 1 auto; max-height: none; background: #fff; border-radius: var(--radius);
+  padding: 12px 13px; color: var(--ink);
+  --ink: #1a1c20; --dim: #4a5058; --faint: #9aa1a9; --line: #d9d9d9;
+  --panel2: #fffaf4; --field: #fff; --bad: #c0392b; --blue: #1550c5;
+}
+#protsheet .prot-text { height: 100%; min-height: 220px; }
+#protsheet .prot-body .note { color: var(--dim); }
+#protsheet .prot-doc { max-width: none; }
+
+.prot { display: flex; flex-direction: column; gap: 7px; }
+.prot-bar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.prot-bar label { gap: 2px; color: var(--dim); font-size: 12px; }
+.prot-bar input[type=number] { width: 58px; }
+.prot-bar .dim { font-size: 11.5px; }
+.prot-body { max-height: 62vh; overflow: auto; }
 .prot-text { width: 100%; height: 52vh; line-height: 1.5; }
+
+/* The pellet in hand, which is what the recipe is scaled by: a row per
+   construct, and the one being read is the one with the dot. */
+.prot-pel { display: flex; gap: 4px; align-items: center; font-size: 12px; color: var(--dim); }
+.prot-pel .pel-c { flex: 1 1 auto; min-width: 0; }
+.prot-pel .pel-g { width: 54px; }
+.prot-pel .dim { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+.prot-pel.on .pel-c { font-weight: 600; }
+
+.prot-doc { max-width: 760px; padding: 2px 2px 10px; --blue: #4a8cf7; }
+.prot-doc input, .prot-doc textarea {
+  width: 100%; background: transparent; border: 1px solid transparent;
+  border-radius: var(--radius); padding: 2px 5px; color: var(--ink);
+  font: inherit; line-height: 1.45; resize: vertical;
+  min-height: 0; field-sizing: content; resize: none;
+}
+.prot-doc input:hover, .prot-doc textarea:hover { border-color: var(--line); }
+.prot-doc input:focus, .prot-doc textarea:focus {
+  border-color: var(--accent-edge); background: var(--panel2); outline: none;
+}
+.prot-title { font-size: 15px; font-weight: 600; margin-bottom: 2px; }
+.prot-title.ro { padding: 2px 5px; }
+.prot-day { margin: 11px 0 4px; border-left: 2px solid var(--accent); padding-left: 7px; }
+.prot-day input, .prot-day .ro { font-weight: 600; font-size: 12.5px; padding: 1px 4px; }
+.prot-step { display: flex; gap: 7px; align-items: flex-start; margin-bottom: 3px; }
+.prot-n {
+  flex: 0 0 18px; text-align: right; padding-top: 3px;
+  color: var(--faint); font-size: 11px; font-variant-numeric: tabular-nums;
+}
+.prot-mid { flex: 1 1 auto; min-width: 0; }
+.prot-sub { margin: 0 0 3px 25px; color: var(--dim); font-size: 12px; }
+.prot-free { margin: 0 0 3px 25px; }
+.prot-what.ro { padding: 2px 5px; white-space: pre-wrap; }
+/* Read off the step rather than written in it, so it is quiet and goes nowhere
+   near the comment color. */
+.prot-rotor { margin: 1px 0 2px 5px; font-size: 11px; color: var(--dim); }
+/* Every field says what it is by how it reads — black for an instruction, red
+   for a comment, blue for taking a sample — and the switch beside it is how
+   that is changed when the import's color or the step's own words got it
+   wrong.  Out of the way until the row is touched. */
+.prot-row { display: flex; align-items: flex-start; gap: 3px; }
+.prot-row > :first-child { flex: 1 1 auto; min-width: 0; }
+.prot-kind {
+  flex: 0 0 16px; width: 16px; min-width: 0; padding: 0 0 0 1px; margin-top: 2px;
+  font-size: 10px; opacity: 0; transition: opacity .12s;
+}
+.prot-row:hover .prot-kind, .prot-row:focus-within .prot-kind { opacity: 1; }
+
+/* Taking a sample is the one step that leaves the protocol and turns up in the
+   figure, so it reads in the color of the thing it points at. */
+.prot-doc .prot-what.prot-sample { color: var(--blue); }
+.prot-link { margin: 1px 0 2px 5px; font-size: 11px; color: var(--blue); }
+.prot-link label { display: flex; gap: 4px; align-items: center; color: inherit;
+                   min-width: 0; white-space: nowrap; }
+.prot-link select { font-size: 11px; flex: 1 1 auto; min-width: 0; }
+.prot-link.none { color: var(--faint); }
+/* What the plate reader answered, under the step that asked it. */
+.prot-link.read { display: flex; gap: 4px; align-items: baseline; flex-wrap: wrap; }
+.prot-link.read button { padding: 0 4px; font-size: 10px; line-height: 1.6; }
+.prot-note { color: var(--bad) !important; font-size: 12px; }
+.prot-note::placeholder { color: var(--faint); font-style: italic; }
+.prot-doc mark.qty, .prot-doc mark.was {
+  background: none; font-weight: 600; font-variant-numeric: tabular-nums;
+}
+.prot-doc mark.qty { color: var(--accent); }
+.prot-doc mark.was { color: var(--bad); }

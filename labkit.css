@@ -619,6 +619,20 @@ canvas { display: block; }
 .plotctl .swatch-pick > span {
   max-width: 76px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* Move one condition along the sequence. Not scoped to the plot panel: the
+   apps that keep their own list of conditions (pHerret's per-mode color
+   rows) use the same button in a row of their own. Small on purpose -- it sits
+   in a row that is mostly a color well and a name, and the list is read far
+   more often than it is reordered. A disabled one stays in place rather than
+   vanishing, so the rows do not shuffle sideways at the ends of the list. */
+.nudge {
+  flex: 0 0 auto; padding: 0 2px; min-width: 13px; height: 16px;
+  font-size: 10px; line-height: 1; color: var(--dim);
+  border: 1px solid var(--line); border-radius: 3px; background: var(--field);
+  cursor: pointer;
+}
+.nudge:hover:not(:disabled) { color: var(--ink); }
+.nudge:disabled { opacity: 0.3; cursor: default; }
 .plotctl .preview {
   font-family: var(--mono); font-size: 11px; color: var(--dim);
   background: var(--field); border: 1px solid var(--line);

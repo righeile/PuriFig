@@ -43,7 +43,7 @@
     <label class="chk"><input id="grid" type="checkbox" checked> grid</label>
     <label class="chk" title="Hide the luminescence and show the white-light image underneath it — hold H, or tick to keep it off. The figure and the export are unchanged."><input id="peekWhite" type="checkbox"> white light</label>
     <button id="fit" title="Zoom to fit (0)">fit</button>
-    <button id="sheet" title="Showing the figure — click for the supplementary sheet of whole blots">figure</button>
+    <select id="board" title="Which artboard is on the canvas"></select>
     <span id="zoomLabel">100%</span>
   </div>
 
@@ -61,7 +61,7 @@
     <button id="integrity" title="Every crop, window, splice and excision in this figure">Integrity…</button>
     <button id="caption" title="Draft the figure legend from the panel metadata">Caption…</button>
     <button id="methods" title="Draft the methods paragraph: how the blots were quantified">Methods…</button>
-    <button id="protocol" title="The purification protocol: import the Word file, edit it, export it with the figure">Protocol…</button>
+    <button id="protocol" title="The purification protocol, on a sheet beside the figure: import the Word file, write in what happened, export it with the figure">Protocol</button>
     <button id="expPdf" class="primary" title="The figure as a vector PDF — labels still text, scans embedded">PDF</button>
     <button id="expSvg" title="The same figure as SVG, for Illustrator">SVG</button>
     <button id="expPng">PNG</button>
@@ -80,6 +80,7 @@
     <svg id="canvas" xmlns="http://www.w3.org/2000/svg"></svg>
     <div id="dropveil">drop a gel, a blot, or a chromatogram export</div>
   </div>
+  <aside id="protsheet" hidden></aside>
   <aside id="inspector"><div class="empty">Nothing selected.</div></aside>
 </main>
 

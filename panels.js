@@ -175,18 +175,25 @@ function gelExtras() {
   };
 }
 
-/** Fill in whatever an older gel panel lacks.  Called on everything opened. */
-function upgradeGel(n) {
-  if (!n || n.type !== 'gel') return n;
-  const x = gelExtras();
-  for (const k of Object.keys(x)) if (n[k] === undefined) n[k] = x[k];
-  const q = n.quant;
-  if (!q.rows) q.rows = [];
-  if (!q.bands) q.bands = [];
-  if (q.method === undefined) q.method = 'border';
-  if (q.border === undefined) q.border = 3;
-  if (q.inset === undefined) q.inset = 0.05;
-  return n;
+/** Fill in whatever a panel saved by an older build lacks.  Called on
+ *  everything opened, against a freshly built node of the same type.
+ *
+ *  A session is read as it was written -- nothing merges it against the
+ *  defaults of the day -- so a gel saved before `labelGap` existed reaches
+ *  `gelTop()` without one and the panel's geometry comes back NaN: invisible
+ *  on the page, and in the exported SVG.  The constructors are the standing
+ *  record of what a panel of each type needs, so what the file lacks is taken
+ *  from one rather than from a second list that has to be kept in step.
+ *
+ *  Only what is missing.  A null crop, an empty lane list and a blank title are
+ *  all answers the file gave, and none of them is a gap to fill. */
+function fillDefaults(o, d) {
+  const deep = v => v !== null && typeof v === 'object' && !Array.isArray(v);
+  Object.keys(d).forEach(k => {
+    if (!(k in o)) o[k] = d[k];
+    else if (deep(o[k]) && deep(d[k])) fillDefaults(o[k], d[k]);
+  });
+  return o;
 }
 
 /** Which lanes survive, grouped into runs of originally-adjacent lanes. */
@@ -1039,6 +1046,11 @@ function quantBoxX(n, lane) {
 /** Lanes a band can be measured in: not the ladder, not a blank. */
 const quantLane = l => l.role !== 'ladder' && l.role !== 'blank';
 
+/** How much of the sample went into a lane, in µL: what the lane says, else
+ *  what the gel says every lane was loaded with.  0 is nobody saying, and then
+ *  nothing is divided by anything. */
+const laneUl = (g, l) => +(l && l.load) || +(g && g.load) || 0;
+
 /** The `row` of a box that is not a band but the whole lane, floor to ceiling.
  *  It is a sentinel rather than a row of its own because every row is a protein
  *  you clicked on, and this one is everything you did not. */
@@ -1209,6 +1221,31 @@ function columnFacts(c) {
 
 const TRACE_COLOURS = ['#000000', '#c62f34', '#5f6772', '#2c7fb8', '#c8935f'];
 
+//: How far above the curve a peak label starts, in mm.
+const PEAK_GAP = 2.0;
+
+/** What a peak label says, line by line: the name, the volume, the mass the
+ *  calibration gives it, the ratio.  Empty when there is nothing to print. */
+function chromPeakLines(n, p) {
+  const lines = [];
+  if (p.label) lines.push(p.label);
+  if (p.showV) lines.push(`${r2(p.v)} mL`);
+  if (p.showMW) { const l = chromMwLabel(n, p.v); if (l) lines.push(l); }
+  if (p.showRatio) { const r = chromRatio(n, p.v); if (r) lines.push(`A₂₆₀/A₂₈₀ ${r2(r)}`); }
+  return lines;
+}
+
+/** What a peak label needs to sit inside the plot: which axis it hangs over,
+ *  the value it hangs from, and how many millimetres of it there are above
+ *  that value.  Null when there is nothing to draw. */
+function chromPeakRoom(n, p) {
+  const t = n.traces.find(x => x.id === p.trace) || n.traces.find(x => x.on !== false);
+  const yv = traceValueAt(t, p.v), lines = chromPeakLines(n, p).length;
+  if (!t || yv === null || !lines) return null;
+  return { right: t.axis === 'right', v: normY(t, yv, n),
+           H: PEAK_GAP + (lines - 1) * n.fontPt * PT * 1.15 + n.fontPt * PT * ASC };
+}
+
 function chromNode(x, y) {
   return {
     id: uid(), type: 'chrom', x: r2(x), y: r2(y), w: 70, h: 42,
@@ -1253,6 +1290,26 @@ function chromScales(n) {
     };
     [ymin, ymax] = span(L);
     [y2min, y2max] = span(R);
+    // Make room for the peak labels.  A label hangs above the curve, and the
+    // peak anyone labels is the tallest one -- so on a range padded by 6% it is
+    // drawn above the frame, through the standards ticks and the title.  The
+    // top of an automatic axis is a free number and the height of a label in
+    // millimetres is not, so it is the axis that gives way.
+    //
+    // A label needs H mm above its own point, which is the share H/h of the
+    // plot: the peak has to sit at or below 1 - H/h of the axis, and that one
+    // line fixes the lowest top that holds it.  A label taller than the plot
+    // has no such top -- the axis would run away to infinity and flatten the
+    // trace to nothing -- so past half the height it is left hanging over.
+    n.peaks.forEach(p => {
+      if (p.v < xmin || p.v > xmax) return;
+      const r = chromPeakRoom(n, p);
+      if (!r || r.H >= n.h * 0.5) return;
+      const lo = r.right ? y2min : ymin;
+      if (r.v <= lo) return;
+      const top = lo + (r.v - lo) * n.h / (n.h - r.H);
+      if (r.right) y2max = Math.max(y2max, top); else ymax = Math.max(ymax, top);
+    });
   }
   const X = v => n.x + (v - xmin) / ((xmax - xmin) || 1) * n.w;
   const Y = v => n.y + n.h - (v - ymin) / ((ymax - ymin) || 1) * n.h;
@@ -1447,6 +1504,100 @@ function traceValueAt(t, v) {
   let best = t.pts[0], bd = Math.abs(t.pts[0][0] - v);
   for (const p of t.pts) { const d = Math.abs(p[0] - v); if (d < bd) { bd = d; best = p; } }
   return best[1];
+}
+
+/** Every turn-over of a trace that stands clear of its own noise, strongest
+ *  first, in whatever the trace counts x in.
+ *
+ *  A local maximum on its own is not a peak.  A curve reaches the canvas
+ *  thinned to each bucket's minimum *and* maximum (`thin`, so no apex is ever
+ *  dropped), which leaves the noise as a zigzag with a maximum at every second
+ *  point -- a plain turn-over test finds seven hundred of them.  What counts is
+ *  how far a maximum stands above the higher of the two valleys flanking it,
+ *  its prominence: the one measure that reads a wobble on the main peak as part
+ *  of that peak and a small peak on a quiet baseline as a peak.
+ *
+ *  The floor is the larger of a few times the point-to-point noise and a small
+ *  share of the trace's range.  The first keeps the zigzag out; the second is
+ *  what stops a clean run from being labeled with a dozen specks of dust beside
+ *  one real peak, which a noise-only threshold does every time.
+ *
+ *  ponytail: the walk out of each maximum is O(n) worst case, so a pathological
+ *  trace is O(n*k) -- at the 1400 points a thinned curve has, nobody notices.
+ */
+function tracePeaks(pts, o = {}) {
+  const snr = o.snr ?? 3, rel = o.rel ?? 0.02, cap = o.max ?? 10, from = o.from ?? -Infinity;
+  if (!pts || pts.length < 5) return [];
+  const y = pts.map(p => p[1]);
+  // A median step, not a mean: the rise of one real peak would otherwise pass
+  // for the noise it has to be told from.
+  const d = [];
+  for (let i = 1; i < y.length; i++) d.push(Math.abs(y[i] - y[i - 1]));
+  d.sort((a, b) => a - b);
+  const floor = Math.max(snr * d[d.length >> 1], rel * (Math.max(...y) - Math.min(...y)));
+  const found = [];
+  for (let i = 1; i < y.length - 1; i++) {
+    if (!(y[i] > y[i - 1] && y[i] >= y[i + 1])) continue;
+    const v = y[i];
+    // A saturated detector repeats its maximum exactly, and that flat run is
+    // one peak -- marked in its middle, not at whichever edge was tested.
+    let j = i;
+    while (j < y.length - 1 && y[j + 1] === v) j++;
+    let lmin = v, rmin = v;
+    for (let l = i; l > 0 && y[l - 1] <= v;) { l--; if (y[l] < lmin) lmin = y[l]; }
+    for (let r = j; r < y.length - 1 && y[r + 1] <= v;) { r++; if (y[r] < rmin) rmin = y[r]; }
+    const prom = v - Math.max(lmin, rmin), at = (i + j) >> 1;
+    if (prom >= floor && floor > 0 && pts[at][0] >= from)
+      found.push({ v: pts[at][0], y: v, prom, i: at });
+    i = j;
+  }
+  // Two maxima with a valley between them shallower than the floor are one
+  // peak with a dent in it, not two peaks.  A trace that reaches the same value
+  // twice -- an integer record at the top of a peak, a detector at its ceiling,
+  // a symmetric apex sampled either side of its middle -- gives both of them
+  // the whole peak's prominence, because each walk runs past the other and out
+  // to the baseline.  The taller wins; sampled either side, the middle does.
+  const out = [];
+  for (const p of found) {
+    const q = out[out.length - 1];
+    if (q && Math.min(...y.slice(q.i + 1, p.i)) > Math.min(q.y, p.y) - floor) {
+      if (p.y > q.y) out[out.length - 1] = p;
+      else if (p.y === q.y)
+        out[out.length - 1] = { ...q, i: (q.i + p.i) >> 1, v: pts[(q.i + p.i) >> 1][0],
+                                prom: Math.max(q.prom, p.prom) };
+      continue;
+    }
+    out.push(p);
+  }
+  return out.sort((a, b) => b.prom - a.prom).slice(0, cap).sort((a, b) => a.v - b.v);
+}
+
+/** Which trace peaks are read off: the absorbance, never the conductivity --
+ *  the same preference `applyTraces` labels the y axis from. */
+function chromUvTrace(n) {
+  const on = n.traces.filter(t => t.on !== false && t.pts && t.pts.length);
+  return on.find(t => /280/.test(t.name)) || on.find(t => /uv|abs/i.test(t.name)) ||
+         on.find(t => t.axis !== 'right') || on[0] || null;
+}
+
+/** The absorbance trace's peaks, as peak labels ready to go on the figure.
+ *
+ *  The volume is the trace's own x, which is the whole point: reading an apex
+ *  off the screen with a ruler and typing it into a prompt was the one number
+ *  on this panel that nobody could check afterwards.
+ *
+ *  Nothing before the injection, when the run says where that was: the sample
+ *  was not on the column yet, so a bump there belongs to the equilibration and
+ *  is a peak of nothing.  V0 is deliberately not used the same way -- it is
+ *  usually itself an estimate, and dropping a real peak because an estimate
+ *  moved is worse than keeping an air bubble. */
+function chromAutoPeaks(n) {
+  const t = chromUvTrace(n);
+  if (!t) return [];
+  const from = n.inject && n.inject.v > 0 ? n.inject.v : -Infinity;
+  return tracePeaks(t.pts, { from }).map(p => ({
+    v: r3(p.v), label: '', showV: true, showMW: !!n.calib.on, showRatio: false, trace: t.id,
+  }));
 }
 
 /** Where the fraction bar sits, and how deep it is.
@@ -1649,9 +1800,6 @@ function renderChrom(n) {
   if (n.rough && roughFit(n)) {
     const rpt = pt * 0.78;
     const cap = 'kDa — column range only, ±2×';
-    // The caption sits at the right end, so tick labels have to stop short of
-    // it — the last one is otherwise printed straight through the middle of it.
-    const capLeft = n.x + n.w - cap.length * rpt * PT * 0.52 - 1.0;
     let last = -1e9;
     // Big masses come off first, so the scale runs backwards against the axis.
     // Walk it left to right, or the collision test rejects everything after the
@@ -1665,14 +1813,18 @@ function renderChrom(n) {
         if (x < n.x + 0.2 || x > n.x + n.w - 0.2) return;
         out += line(x, n.y, x, n.y + n.h, 0.12, ROUGH_INK);
         const half = String(kDa).length * rpt * PT * 0.3;
-        if (x - half > last + 0.3 && x + half < capLeft) {
+        if (x - half > last + 0.3) {
           out += txt(x, n.y + rpt * PT * 1.05, String(kDa), { pt: rpt, fill: ROUGH_INK });
           last = x + half;
         }
       });
     // The figure has to say what the scale is, not only look faint: dimness
     // travels badly through a photocopier and not at all through a redraw.
-    out += txt(n.x + n.w, n.y + rpt * PT * 1.05, cap,
+    //
+    // On its own row under the numbers.  Sharing their row cost a third of the
+    // axis -- every tick right of where the caption began went unlabeled, which
+    // on a narrow panel is every tick but the first two.
+    out += txt(n.x + n.w, n.y + rpt * PT * 2.25, cap,
                { pt: rpt, fill: ROUGH_INK, anchor: 'end' });
   }
 
@@ -1722,15 +1874,11 @@ function renderChrom(n) {
     const yv = traceValueAt(t, p.v);
     const Yf = t && t.axis === 'right' ? S.Y2 : S.Y;
     const y = yv === null ? n.y : Yf(normY(t, yv, n));
-    const lines = [];
-    if (p.label) lines.push(p.label);
-    if (p.showV) lines.push(`${r2(p.v)} mL`);
-    if (p.showMW) { const l = chromMwLabel(n, p.v); if (l) lines.push(l); }
-    if (p.showRatio) { const r = chromRatio(n, p.v); if (r) lines.push(`A₂₆₀/A₂₈₀ ${r2(r)}`); }
+    const lines = chromPeakLines(n, p);
     if (!lines.length) return;
     const lh = pt * PT * 1.15;
     out += line(x, y - 0.6, x, y - 1.6, 0.2);
-    out += txtLines(x, y - 2.0 - (lines.length - 1) * lh, lines, { pt, lineHeight: 1.15 });
+    out += txtLines(x, y - PEAK_GAP - (lines.length - 1) * lh, lines, { pt, lineHeight: 1.15 });
   });
 
   return out;
@@ -2258,6 +2406,7 @@ function quantData(q) {
     if (!tRow) { D.issues.push(`${who}: nothing measured for ${D.target || 'a target'}`); return; }
     if (D.control && !cRow) D.issues.push(`${who}: no loading control measured, so none of it can be normalized`);
     const lanes = g.lanes.filter(quantLane);
+    const anyUl = lanes.some(l => laneUl(g, l) > 0);
     const got = {};
     lanes.forEach((l, p) => {
       const tb = g.quant.bands.find(b => b.row === tRow.id && b.lane === l.id);
@@ -2268,6 +2417,12 @@ function quantData(q) {
       const cb = (cRow && cl) ? cg.quant.bands.find(b => b.row === cRow.id && b.lane === cl.id) : null;
       const row = { lane: l, key, t: tb, c: cb, value: null, why: [] };
       if (tb.weak) row.why.push('no band found — measured at the row');
+      // Half the sample is half the band, so a lane loaded with less of it is
+      // divided by less and the quantity is per µL.  It cancels inside a share
+      // and against a loading control in the same lane -- both already divide
+      // by something that was loaded alongside -- so only the plain intensity
+      // is on a different scale when a lane does not say.
+      const ul = laneUl(g, l), cul = cl ? laneUl(cg, cl) : 0;
       if (D.readout === 'size') {
         // Read off this blot's own ladder at the row the band was found on.
         // It is per lane: the box height is shared across a row so the lanes
@@ -2292,9 +2447,19 @@ function quantData(q) {
         else if (!cb || !isFinite(cb.net)) row.why.push('no loading control in this lane' +
                                                         (cg === g ? '' : ` on ${repName(cg, -1)}`));
         else if (!(cb.net > 0)) row.why.push('loading control is not above background');
-        else row.value = tb.net / cb.net;
+        else {
+          // The control is the same sample on another membrane, which may have
+          // taken a different volume of it; dividing both sides is right and
+          // cancels when the two are equal.  One side alone is not knowing, so
+          // it says so rather than correcting by half the information.
+          if (!ul !== !cul) row.why.push('only one of the two lanes says how much was loaded, ' +
+                                         'so the ratio is not corrected for it');
+          row.value = tb.net / cb.net * (ul && cul ? cul / ul : 1);
+        }
+      } else if (anyUl && !ul) {
+        row.why.push('no loaded volume, so it is not on the scale of the lanes that have one');
       } else {
-        row.value = tb.net;
+        row.value = tb.net / (ul || 1);
       }
       // A clipped band is the wrong height but not in the wrong place, so
       // saturation is a reason to drop how much there is and not where it ran.
@@ -2329,6 +2494,16 @@ function quantData(q) {
   });
 
   D.conditions = order;
+  // A quantity per µL and a quantity per lane are different units.  Each blot
+  // relative to something of its own is safe either way, so this is only a
+  // problem where the blots share a raw axis.
+  D.perUl = D.readout === 'intensity' && !D.control &&
+            gels.some(g => g.lanes.filter(quantLane).some(l => laneUl(g, l) > 0));
+  if (D.perUl && q.norm !== 'ref' && q.norm !== 'mean') {
+    const said = gels.map(g => g.lanes.filter(quantLane).some(l => laneUl(g, l) > 0));
+    if (!said.every(Boolean))
+      D.issues.push('some blots say how much was loaded and some do not, so they are not on one scale');
+  }
   // `D.refs` is what the arithmetic divides by; `D.ref` is the same thing as a
   // name to print, so every "relative to ..." in the app reads one field and
   // says "WT1 + WT2" without knowing there are two of them.
@@ -2403,7 +2578,8 @@ function quantYLabel(q, D) {
   if (D.readout === 'share') return `${D.target || 'the band'}\n(% of total)`;
   const what = D.control ? `${D.target || 'target'} / ${D.control}` : (D.target || 'signal');
   const rel = q.norm === 'ref' && D.ref ? `relative to ${D.ref}`
-            : q.norm === 'mean' ? 'relative to the mean' : '';
+            : q.norm === 'mean' ? 'relative to the mean'
+            : D.perUl ? 'per µL loaded' : '';
   return rel ? `${what}\n(${rel})` : what;
 }
 
@@ -3258,13 +3434,9 @@ function chromInkBox(n) {
     const yv = traceValueAt(t, p.v);
     const Yf = t && t.axis === 'right' ? S.Y2 : S.Y;
     const y = yv === null ? n.y : Yf(normY(t, yv, n));
-    const lines = [];
-    if (p.label) lines.push(p.label);
-    if (p.showV) lines.push(`${r2(p.v)} mL`);
-    if (p.showMW) { const l = chromMwLabel(n, p.v); if (l) lines.push(l); }
-    if (p.showRatio) { const r = chromRatio(n, p.v); if (r) lines.push(`A₂₆₀/A₂₈₀ ${r2(r)}`); }
+    const lines = chromPeakLines(n, p);
     if (!lines.length) return;
-    b = growText(b, x, y - 2.0 - (lines.length - 1) * pt * PT * 1.15,
+    b = growText(b, x, y - PEAK_GAP - (lines.length - 1) * pt * PT * 1.15,
                  lines.join('\n'), pt, 'middle');
   });
   if ((n.marks.v0 && n.column.v0 > 0) || (n.marks.vt && n.column.vt > 0) ||

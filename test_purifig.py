@@ -941,6 +941,68 @@ def test_the_figure_pdf_is_exactly_the_page_and_still_text():
     assert float(page.mediabox.bottom) < 0.1, page.mediabox
 
 
+def test_a_tecan_sheet_reads_its_wells_and_its_settings():
+    """The reader's own fixture, run where a failure shows up in the suite.
+
+    A Spark writes its settings as labelled cells and its plate as a sparse
+    grid, so both the labels and the well letters are parsed, not counted.
+    """
+    import tecan
+    tecan._check()
+
+
+def test_a_chemstation_injection_brings_in_every_channel():
+    """An Agilent .D, as the file dialog hands it over.
+
+    Both ways in -- the folder, and one channel inside it -- are the same
+    injection, so both bring in every detector that recorded it.  The x axis
+    is the thing to watch: volume only where the method wrote down a flow
+    rate, minutes where it did not, because the two look alike on a plot and
+    only one of them is a size exclusion figure.
+    """
+    import shutil
+    import tempfile
+
+    from labkit import chemstation
+
+    ch = chemstation._fixture([0, 5, 9, 40, 9, 4, 4, 3, 3], "MWD1A, Sig=280,10")
+    tmp = tempfile.mkdtemp()
+    try:
+        d = os.path.join(tmp, "A1.D")
+        os.mkdir(d)
+        for name in ("MWD1A.ch", "FLD1A.ch"):
+            with open(os.path.join(d, name), "wb") as fh:
+                fh.write(ch)
+
+        r = S.parse_chromatogram(d)
+        assert len(r["curves"]) == 2, r["curves"]
+        assert [c["xunit"] for c in r["curves"]] == ["min", "min"], r["curves"]
+        assert r["curves"][0]["xmax"] == 1.0, r["curves"][0]["xmax"]
+        assert r["name"] == "A1.D", r["name"]
+
+        # The same injection, reached through one of its channels.
+        one = S.parse_chromatogram(os.path.join(d, "FLD1A.ch"))
+        assert [c["name"] for c in one["curves"]] == \
+               [c["name"] for c in r["curves"]], one["curves"]
+
+        # A flow rate in the method turns the axis into volume -- and 0.2
+        # mL/min over a one-minute run is 0.2 mL, not one.
+        with open(os.path.join(d, "acq.txt"), "wb") as fh:
+            fh.write("Pump\r\nFlow:          0.200 mL/min\r\n".encode("utf-16"))
+        v = S.parse_chromatogram(d)
+        assert v["curves"][0]["xunit"] == "mL", v["curves"][0]["xunit"]
+        assert abs(v["curves"][0]["xmax"] - 0.2) < 1e-9, v["curves"][0]["xmax"]
+        assert v["run"]["flow"] == 0.2, v["run"]
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_the_chemstation_reader_reads_its_own_fixture():
+    """labkit's decoder, run where a failure shows up in this suite too."""
+    from labkit import chemstation
+    chemstation._check()
+
+
 if __name__ == "__main__":
     for name, fn in sorted(vars().items()):
         if name.startswith("test_"):

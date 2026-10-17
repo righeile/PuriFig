@@ -489,6 +489,10 @@ def _check():
            "## Day 1 - 06.02.2026\n- Thaw cell pellet\n> Comment: pellet was soft\n"
            "- Centrifuge at 85kg\n\n## Day 2 - 07.02.2026\n- Run the SEC\n")
     items = parse(src)
+    # The form in app.js reads the same five kinds out of the same text, and
+    # `test_protocol.js` asserts this list against this fixture.  The two
+    # readings have to agree: this file holds the writers, so a line the form
+    # calls a step and this calls a comment goes out in the wrong color.
     kinds = [i["kind"] for i in items if i["kind"] != "blank"]
     assert kinds == ["title", "heading", "step", "line", "heading", "step",
                      "comment", "step", "heading", "step"], kinds

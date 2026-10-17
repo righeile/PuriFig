@@ -746,10 +746,29 @@
   const JOURNAL_PANEL = { bar_mm: 3.5, axes_mm: 32, line_width: 0.75 };
 
   /** Mirrors labkit.plots.PlotSpec -- keep the two in step. */
+  /* `names` in the sequence `order` asks for, keeping the strangers.
+   *
+   * The twin of labkit.plots.order_series, and the same reasoning: the order a
+   * reader needs is almost never alphabetical -- WT, P716L, Y715C is the order
+   * along the protein, and sorting puts the wild type last. A name the order
+   * does not mention keeps its place after the ones it does, so a saved order
+   * outlives the dataset it was typed for and a new condition appears at the
+   * end instead of vanishing. */
+  LK.orderSeries = function (names, order) {
+    const have = (names || []).map(String);
+    if (!order || !order.length) return have;
+    const seen = new Set();
+    const first = [];
+    order.map(String).forEach((name) => {
+      if (have.includes(name) && !seen.has(name)) { seen.add(name); first.push(name); }
+    });
+    return first.concat(have.filter((n) => !seen.has(n)));
+  };
+
   LK.defaultSpec = function () {
     return {
       kind: 'bar', centre: 'mean', error: 'sem', points: 'jitter',
-      palette: 'red-grey', colours: {},
+      palette: 'red-grey', colours: {}, order: [],
       width_mm: 85, height_mm: 0, axes_width_mm: 0, axes_height_mm: 0, bar_mm: 3.5,
       horizontal: false,
       font_pt: 8, font: 'arial',
@@ -845,8 +864,16 @@
     rows.forEach(([key, built]) => { fields[key] = built.field; root.appendChild(built.row); });
 
     const swatches = el('div', { class: 'swatches' });
+    /* The way back out of a typed order, which is not the same as alphabetical:
+       it hands the sequence back to whatever the data arrived in. */
+    const orderReset = el('button', { type: 'button', class: 'small ghost', hidden: true,
+      text: 'Default order',
+      title: 'Forget the order typed here and draw the conditions in the order '
+        + 'the data arrived in' });
     root.appendChild(el('label', { class: 'row' },
       [el('span', { text: '' }), swatches]));
+    root.appendChild(el('label', { class: 'row' },
+      [el('span', { text: '' }), orderReset]));
 
     // Saved schemes. Hidden unless the app serves the store, so an app
     // without labkit.schemes wired up shows no button that cannot work.
@@ -1192,6 +1219,12 @@
        when the palette or the list of names changes, because rebuilding it
        under an open picker closes the picker. */
     let colourKeys = [];
+    /* The names as the data handed them over, kept so that "Default order"
+       has something to go back to: `colourKeys` is the *drawn* sequence and a
+       move rewrites it, so clearing `order` without this would leave the panel
+       showing a sequence the figure no longer draws -- the two disagreeing is
+       the exact failure the one-sequence rule exists to prevent. */
+    let arrivedKeys = [];
     let colourSig = null;
     const colourInputs = {};
 
@@ -1213,7 +1246,7 @@
           swatches.appendChild(el('span', { class: 'swatch', style: { background: colour } })));
         return;
       }
-      colourKeys.forEach((key) => {
+      colourKeys.forEach((key, at) => {
         /* Keyed by name: an override has to mean "the KO is this red", not
            "the second group is", or a figure that gains a genotype in the
            middle of the list silently recolors the ones either side. */
@@ -1221,9 +1254,33 @@
           state.colours = Object.assign({}, state.colours, { [key]: input.value });
         } });
         colourInputs[key] = input;
+        /* This list is already the conditions in the order they are drawn, so
+           it is where they are reordered: one move writes `order`, and the
+           figure, the colors and the brackets all follow it because they are
+           all read off the one sequence. */
+        const move = (step) => () => {
+          const i = colourKeys.indexOf(key);
+          const j = i + step;
+          if (i < 0 || j < 0 || j >= colourKeys.length) return;
+          const next = colourKeys.slice();
+          next.splice(j, 0, next.splice(i, 1)[0]);
+          colourKeys = next;
+          state.order = next.slice();
+          colourSig = null;            // the signature IS the key list: force the rebuild
+          refresh();
+        };
+        const arrow = (text, step, dead) => el('button', {
+          type: 'button', class: 'nudge', text, disabled: dead,
+          title: dead ? '' : (step < 0 ? 'Draw ' + key + ' earlier'
+                                       : 'Draw ' + key + ' later'),
+          onclick: move(step),
+        });
         swatches.appendChild(el('label', { class: 'swatch-pick' },
-          [input, LK.hexBox(input), el('span', { text: key })]));
+          [arrow('\u25c2', -1, at === 0), input, LK.hexBox(input),
+           el('span', { text: key }),
+           arrow('\u25b8', 1, at === colourKeys.length - 1)]));
       });
+      orderReset.hidden = !(state.order && state.order.length);
       writeColours();
     }
 
@@ -1252,6 +1309,13 @@
       buildSwatches();
       preview.textContent = describe(state);
     }
+
+    orderReset.addEventListener('click', () => {
+      state.order = [];
+      colourKeys = arrivedKeys.slice();   // back to the order the data arrived in
+      colourSig = null;
+      refresh();
+    });
 
     let notifying = false;
     function refresh() {
@@ -1382,9 +1446,13 @@
         readFields();
         writeColours();
       },
-      /** One color box per series, named. Call it once the labels are known. */
+      /** One color box per series, named, in the order they will be drawn.
+          Call it once the labels are known: it is also the reorder control, so
+          an app that never calls it gets palette swatches and no way to say
+          what sequence the conditions go in. */
       setColourKeys(labels) {
-        colourKeys = (labels || []).map(String);
+        arrivedKeys = (labels || []).map(String);
+        colourKeys = LK.orderSeries(arrivedKeys, state.order);
         buildSwatches();
       },
       /** Offer "everything against <control>" once the group labels are known. */
@@ -1444,6 +1512,7 @@
    *   layout    { format, labels: { column: { B01: 'WT' } } } -- the shape
    *             labkit.plate reads and writes, edited in place
    *   wells     the ids that have data; every other well is drawn faint
+   *   emptyNote what a well with no data is called on hover ('no images')
    *   columns   names to offer for a column of labels
    *   onchange  called after every edit
    *
@@ -1453,7 +1522,11 @@
    */
   LK.plateEditor = function (host, options) {
     const opts = Object.assign({ layout: null, wells: [], onchange: null,
-      columns: ['variant', 'treatment', 'condition', 'concentration', 'cell_line'] },
+      columns: ['variant', 'treatment', 'condition', 'concentration', 'cell_line'],
+      // What a well with no data is called on hover. Most callers here mean
+      // images; an app planning a plate it has not run yet means something
+      // else, and a hard-coded 'no images' was simply wrong on its screen.
+      emptyNote: 'no images' },
     options || {});
     const layout = opts.layout || {};
     layout.labels = layout.labels || {};
@@ -1588,7 +1661,7 @@
         grid.appendChild(el('div', {
           class: 'lk-well' + (present.has(id) ? ' has' : '') + (picked.has(id) ? ' sel' : ''),
           text: labels[id] || '',
-          title: [id].concat(said, present.has(id) ? [] : ['no images']).join(' · '),
+          title: [id].concat(said, present.has(id) ? [] : [opts.emptyNote]).join(' · '),
           style: labels[id] ? { background: tint(labels[id]) + '66' } : null,
           // preventDefault: a drag across the grid is a selection of wells,
           // not of the text in them.

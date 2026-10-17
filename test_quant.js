@@ -460,4 +460,48 @@ assert.ok(R3.issues.some(t => /r3/.test(t) && /c2/.test(t)), R3.issues);
 // Named junk falls back to the first condition rather than dividing by nothing.
 assert.deepStrictEqual(quantData({ ...qr, ref: ['nope'] }).refs, ['c1']);
 
+/* ---- how much of the sample went into the lane ---- */
+
+// Four times the signal because four times the sample went in: per µL the two
+// lanes are the same, which is the comparison the figure is making.
+const u1 = three('u1', [[100, 100, 800], [400, 400, 3200]]);
+u1.lanes[0].load = 5; u1.lanes[1].load = 20;
+const qu = { id: 'qu', type: 'quant', gels: ['u1'], readout: 'intensity', target: 'mature',
+             match: 'label', norm: 'none', error: 'sd', keepSaturated: false, satTol: 2,
+             useControl: false };
+PF.doc = { nodes: [u1, qu] };
+const U = quantData(qu);
+assert.ok(Math.abs(U.summary['wild type'].vals[0] - 160) < 1e-9, U.summary['wild type'].vals);
+assert.ok(Math.abs(U.summary['mutant'].vals[0] - 160) < 1e-9, U.summary['mutant'].vals);
+assert.ok(/per µL loaded/.test(quantYLabel(qu, U)), quantYLabel(qu, U));
+
+// The gel says what every lane was loaded with; a lane may say its own instead.
+u1.lanes[0].load = ''; u1.load = 5;
+const U1 = quantData(qu);
+assert.ok(Math.abs(U1.summary['wild type'].vals[0] - 160) < 1e-9, U1.summary['wild type'].vals);
+assert.ok(Math.abs(U1.summary['mutant'].vals[0] - 160) < 1e-9, U1.summary['mutant'].vals);
+
+// A lane that says nothing while its neighbour does is not on the same scale,
+// so it is left off rather than quietly compared.
+const u2 = three('u2', [[100, 100, 800], [400, 400, 3200]]);
+u2.lanes[1].load = 20;
+PF.doc = { nodes: [u2, qu] };
+const U2 = quantData({ ...qu, gels: ['u2'] });
+assert.strictEqual(U2.summary['wild type'].n, 0, 'a lane with no volume was compared anyway');
+assert.strictEqual(U2.summary['mutant'].n, 1);
+
+// It cancels against a loading control, which went into the lane with it, and
+// inside a share, which divides by the lane's own total.
+const u3 = three('u3', [[100, 100, 800], [400, 400, 3200]]);
+const qc = { ...qu, gels: ['u3'], useControl: true, control: 'GAPDH' };
+PF.doc = { nodes: [u3, qc] };
+const even = quantData(qc).summary['mutant'].vals[0];
+u3.lanes[0].load = 5; u3.lanes[1].load = 20;
+assert.ok(Math.abs(quantData(qc).summary['mutant'].vals[0] - even) < 1e-9,
+          'a loading control already carries the loading');
+assert.ok(!quantData(qc).perUl, 'a ratio to a loading control is not per µL');
+const qsh = { ...qu, gels: ['u3'], readout: 'share', target: 'intermediate' };
+assert.ok(Math.abs(quantData(qsh).summary['mutant'].vals[0] - 10) < 1e-9,
+          quantData(qsh).summary['mutant'].vals);
+
 console.log('ok');

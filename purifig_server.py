@@ -44,13 +44,15 @@ from scipy import ndimage as ndi
 from flask import Flask, Response, jsonify, request, send_from_directory
 
 from labkit import browse as LKB
+from labkit import chemstation
 
 import protocol as proto
+import tecan
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 IMAGE_EXTS = (".tif", ".tiff", ".png", ".jpg", ".jpeg", ".gel", ".bmp", ".scn")
-TRACE_EXTS = (".asc", ".txt", ".csv", ".tsv", ".xls", ".res")
+TRACE_EXTS = (".asc", ".txt", ".csv", ".tsv", ".xls", ".res", ".ch")
 
 try:
     import tifffile
@@ -1044,6 +1046,67 @@ def _paired_layout(body, units, width):
     return votes >= 2 or (len(set(even)) == 1 and bool(even[0]))
 
 
+# ------------------------------------------------- Agilent ChemStation .D/.ch
+
+def parse_chemstation(path):
+    """One ChemStation injection: a `.ch` channel, or the `.D` folder it is in.
+
+    The decoding is labkit's, because Daltonia reads the same run folders off
+    the same instrument.  This only puts the channels into the shape the rest
+    of this file speaks.
+
+    Every channel of the injection comes in, each as its own curve under the
+    name the instrument gave it, and the figure picks between them with the
+    tick boxes it already has.  Choosing one here would be this program
+    deciding which detector the figure is about, and the fluorescence channel
+    of an FSEC run is exactly the one that would then be labeled A280.
+
+    x is minutes, unless the injection's own `acq.txt` states a flow rate --
+    then it is mL, which is what a size exclusion figure is drawn against.  A
+    flow is never assumed: with no line to read, the axis stays in time.
+    """
+    folder = path if os.path.isdir(path) else os.path.dirname(path)
+    # cap: thinning for the canvas happens downstream, on whichever curves the
+    # panel ends up drawing, so nothing is thrown away this early.
+    inj = chemstation.injection(folder, cap=10 ** 9)
+    if not inj["signals"]:
+        raise ValueError("no channel could be read in %s%s"
+                         % (os.path.basename(folder),
+                            " — " + "; ".join(inj["unreadable"])
+                            if inj["unreadable"] else ""))
+    flow = inj["flow_ml_min"]
+    curves = []
+    for s in inj["signals"]:
+        curves.append({
+            # The instrument pads its own description out with spaces
+            # ("MWD1A, Sig=280,10  Ref=off"); a legend wants one.
+            "name": re.sub(r"\s+", " ", (s["description"] or s["name"]).strip()),
+            "unit": s["units"], "xunit": "mL" if flow else "min",
+            "x": [v * flow for v in s["x"]] if flow else list(s["x"]),
+            "y": list(s["y"]),
+        })
+    for c in curves:
+        c["ymin"], c["ymax"] = float(min(c["y"])), float(max(c["y"]))
+        c["xmin"], c["xmax"] = float(min(c["x"])), float(max(c["x"]))
+    # The vial is what the bench knows the sample by -- "P1-A1" is the well
+    # the plan put it in -- while the sample name off the sequence table is
+    # often just its number in the queue.
+    label = (inj.get("vial") or "").strip() or (inj.get("sample") or "").strip()
+    run = {"id": label or inj["dir"],
+           "started": inj.get("when") or "",
+           "xaxis": "Elution volume (mL)" if flow else "Retention time (min)",
+           "logbook": []}
+    if flow:
+        run["flow"] = flow
+    return {
+        "path": path, "encoding": "binary (ChemStation .ch)", "paired": False,
+        "name": label or inj["dir"],
+        "curves": curves, "fractions": [], "run": run,
+        "columns": len(curves), "rows": max(len(c["x"]) for c in curves),
+        "unreadable": inj["unreadable"],
+    }
+
+
 def parse_chromatogram(path):
     """UNICORN ASCII export, or any x/y table.
 
@@ -1054,8 +1117,11 @@ def parse_chromatogram(path):
     silently mangles this, so it is worth reading properly here.
 
     A binary .RES is recognized by its magic number rather than by its
-    extension, because the ASCII export is often saved as .res too.
+    extension, because the ASCII export is often saved as .res too.  An
+    Agilent `.ch`, or the `.D` folder around it, goes to the reader above.
     """
+    if os.path.isdir(path) or path.lower().endswith(".ch"):
+        return parse_chemstation(path)
     with open(path, "rb") as fh:
         if fh.read(4) == RES_MAGIC:
             return parse_res(path)
@@ -2175,7 +2241,7 @@ def chrom_open():
             c["points"] = downsample(c, int(body.get("maxPoints", 1400)))
             c.pop("x", None)
             c.pop("y", None)
-        parsed["name"] = os.path.basename(body["path"])
+        parsed.setdefault("name", os.path.basename(body["path"]))
         return jsonify(parsed)
     except Exception as exc:
         return _fail(exc, 400)
@@ -3024,6 +3090,21 @@ def protocol_open():
         path = os.path.abspath(os.path.expanduser(str(body.get("path") or "")))
         got = proto.read_docx(path)
         return jsonify({"path": path, "name": os.path.basename(path), **got})
+    except Exception as exc:
+        return _fail(exc, 400 if isinstance(exc, (OSError, ValueError,
+                                                  zipfile.BadZipFile)) else 500)
+
+
+@app.route("/api/tecan/open", methods=["POST"])
+def tecan_open():
+    """A TECAN result sheet as the reads in it, wells and all."""
+    body = request.get_json(force=True, silent=True) or {}
+    try:
+        path = os.path.abspath(os.path.expanduser(str(body.get("path") or "")))
+        got = tecan.read_xlsx(path)
+        for r in got["reads"]:
+            r["says"] = tecan.says(r)
+        return jsonify({"path": path, **got})
     except Exception as exc:
         return _fail(exc, 400 if isinstance(exc, (OSError, ValueError,
                                                   zipfile.BadZipFile)) else 500)

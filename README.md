@@ -634,12 +634,28 @@ on this one. A strip with no ladder rung inside it is a finding, because nothing
 on the figure then says what size it shows. The rest of the membrane is in the
 source data, with the strips outlined on it.
 
+## Artboards
+
+A document is one figure and as many other canvases as the paper needs: a second
+figure, a scheme, a panel being tried out before it goes in. The menu in the
+toolbar says which one is on the canvas and switches between them, **`+
+artboard`** adds one the size of the last, and the **artboards** list in the
+inspector -- there when nothing is selected -- names, counts and deletes them.
+
+Each board is a canvas of its own: its own page size, its own panels, its own
+export, named after it. They share the scans, the figure metadata and the
+protocol, because those are the document rather than the page -- a blot used on
+two boards is one image, not two copies free to drift apart. A panel reads only
+the panels beside it on the same board, so a quantification cannot measure a
+blot that is on another one. Undo crosses between boards, and a session carries
+all of them.
+
 ## The supplementary sheet
 
 A journal wants the uncropped blot, and the honest version of that is not the
 raw scan: it is the *same* picture the figure shows, with the cropping taken
-off. **`figure`** in the toolbar builds it the first time it is clicked and
-switches between the two sheets afterwards.
+off. **`+ supplementary sheet`**, in the toolbar menu or the artboards
+list, builds it; afterwards it is an artboard like any other.
 
 Every cropped gel or blot panel in the figure gets a twin on the sheet, in the
 figure's own order and carrying its letter — `(C) blot 1`. The twin is the panel
@@ -672,11 +688,10 @@ labels actually reach, a slanted row included. In the crop fold,
 switches by hand, on any panel.
 
 The sheet is a canvas like any other — move, resize, relabel, add text, export.
-Exports are named for the sheet showing: `figure.svg` and `supplementary.svg`,
+Exports are named for the board showing: `figure.svg` and `supplementary.svg`,
 `figure_600dpi.png` and `supplementary_600dpi.png`. **`rebuild from the figure`**
 replaces the sheet with a fresh build, which loses anything arranged by hand;
-one undo brings it back. Undo crosses between the sheets, and a session carries
-both.
+one undo brings it back.
 
 ## Quantifying bands
 
@@ -791,6 +806,26 @@ quantity. Conditions are matched across blots by lane label, or by position. The
 reference condition is then 1 with no spread by construction, which the inspector
 says rather than leaving it to look like a remarkably reproducible control.
 
+**How much of the sample went into the lane** is the other thing that is not in
+the picture. A purification loads what it has: 20 µL of lysate beside 5 µL of a
+concentrated eluate, and the two bands are then not two amounts of protein but
+two amounts of loading. `loaded µL`, in the gel's **lanes** fold, says what every
+lane of that blot took; once it says something each lane gets a box of its own
+beside its role, for the one that took less. Every quantity is divided by it, so
+the bars compare the sample rather than the well and the axis says **per µL
+loaded**. Leave it empty and nothing is divided — a figure that never loaded
+different volumes looks exactly as it did.
+
+It is not a second normalization. The volume **cancels against a loading
+control** (the control went into the lane with the target, so the ratio already
+carries it) and **inside a share** (the lane's own total carries it), so neither
+of those readouts changes by a decimal. It changes the plain intensity, which is
+the readout that has nothing else to divide by. **A lane left empty while its
+neighbours say a volume is left off the plot**, with the reason on the lane: it
+is not on their scale, and half a scale is worse than none. The loaded volume is
+in the source-data CSV and in the integrity sheet, lane by lane, because it
+changed the numbers.
+
 **Two lanes of one condition on one blot** — the same label twice — are two
 preparations run side by side, or one preparation loaded twice. The first counts
 towards n; the second is a second reading of one thing and belongs in one point.
@@ -870,7 +905,10 @@ back to the OS picker when the server is down — the browser reads every one of
 these formats anyway, so there is no reason to offer a file browser that can only
 say "offline". Either way the shape
 is **detected, not assumed** — by content, not by extension, because all three
-of these formats get saved under all three suffixes.
+of these formats get saved under all three suffixes. The exception is a
+ChemStation `.ch`, which carries a version string where the others carry a
+magic number, and comes in a folder of its own: there the suffix and the `.D`
+around it are what say so.
 
 **A UNICORN `.RES`** is the file the instrument writes, and reading it directly
 skips the export step. It is binary: a header, a directory of 344-byte entries,
@@ -887,6 +925,31 @@ is the one under which the trace still reaches the last mark. Reading a 70 min
 run as 29 min leaves the final logbook entry off the end, which is the tell.
 With no marks to check against the millilitre axis wins, because a
 size-exclusion column is read in volume.
+
+**An Agilent ChemStation injection** is a `.D` folder, and inside it one `.ch`
+file per detector channel. Open the folder in the dialog and pick any channel:
+the panel takes **every** channel of that injection, each as its own curve under
+the name the instrument gave it — `FLD1A, Ex=480, Em=520` next to
+`MWD1A, Sig=280,10` — and the tick boxes choose between them. Picking one here
+would be this program deciding which detector the figure is about, and on an
+FSEC run the fluorescence channel is exactly the one that would end up labeled
+A280.
+
+A `.ch` is a delta stream, not a table, and only format version 130 is read; a
+file saying anything else is reported by its version rather than guessed at. The
+decoding is `labkit/chemstation.py`, shared with Daltonia, which reads the same
+run folders from the plate-planning end — edit it at `Apps/labkit/`.
+
+x is **minutes**, unless the injection's own `acq.txt` states a flow rate, and
+then it is mL and the axis says so. The flow is never assumed: an HPLC trace
+with no flow written down stays in time, because minutes relabeled as
+millilitres is the one error a reader has no way to catch. The panel is named
+after the vial — `P1-A1`, the well the plan put the sample in — not after the
+channel that was clicked to reach it.
+
+Several injections of *one* channel, overlaid, is the other question, and
+Daltonia's Processing tab answers it: it writes the paired-column export below,
+one pair per injection, which lands here as a figure with one curve per sample.
 
 **A UNICORN ASCII export** is UTF-16 with a BOM, tab separated, and one *pair* of
 columns per curve — each pair carrying its own volume axis, because the curves
@@ -937,7 +1000,13 @@ The wavelength is not invented either. An ÄKTAprime records the trace as plain
 so it is not in the file — and that curve is labeled `Absorbance (mAU)`. A file
 that does name a wavelength gets `A₂₈₀`.
 
-**The window the traces are drawn in** is whatever they cover, padded a little.
+**The window the traces are drawn in** is whatever they cover, padded a little,
+and then raised until the peak labels fit under the frame. A label hangs above
+the curve and the peak anyone labels is the tallest one, so 6% of padding leaves
+three lines of it printed over the standards ticks and the title. The top of an
+automatic axis is a free number and the height of a label in millimetres is not,
+so it is the axis that gives way — unless the label is taller than half the
+panel, which no axis can hold without flattening the trace to nothing.
 Untick **auto range** under *axes* and x, y and — where a curve is on the second
 axis — y2 become yours: a SEC profile cropped to the peaks, or two columns drawn
 to one scale so the shift between them is the thing you see. Anything outside
@@ -947,6 +1016,24 @@ Which axis a curve is drawn against is a question about its **unit**, not its
 name. `UV_CUT_TEMP@100,BASEM` is the baseline UNICORN subtracted, in mAU, and it
 belongs beside the absorbance it came off — the word `TEMP` in the middle of it
 notwithstanding.
+
+**The peaks find themselves.** A run loaded through any of the readers is read
+for its peaks on the way in, and each one is labeled with the volume it came off
+at — in mL taken off the trace, rather than off a ruler held up to the screen.
+`find peaks` under *peak labels* does it again, after a rebase or once you have
+deleted the ones you did not want, and it never moves or drops a peak already on
+the figure, named or not.
+
+What makes a maximum a peak is how far it stands above the higher of the two
+valleys beside it — its prominence — and not how tall it is: a wobble on the
+flank of the main peak belongs to that peak, and a small peak on a quiet
+baseline is a peak. It has to clear both a few times the trace's own
+point-to-point noise and a fiftieth of the trace's range; the second floor is
+what keeps a clean run from being labeled with a dozen specks of dust beside one
+real peak, which is what a noise threshold alone does. The absorbance is what
+gets read, never the conductivity, and nothing before the injection, because the
+sample was not on the column yet. Naming a peak is still yours — what the
+program can see is where the curve turns over, not what came off there.
 
 Set the column and V₀/Vt from the presets, load a standards kit, and type the
 elution volume beside each standard: the panel then draws the standards as ticks
@@ -1339,8 +1426,9 @@ with it. The gels keep their own backgrounds; those are in the scans.
 
 All three are named after the session they came from, so the figure, the session
 and the protocol document are one set on disk rather than `figure(3).pdf` among
-them; the supplementary sheet adds `_supplementary` so it cannot be submitted as
-the figure. An unsaved figure falls back to its title.
+them; every artboard past the figure adds its own name -- `_supplementary`, or
+`_mechanism` for one called Mechanism -- so no two of them come out as the same
+file. An unsaved figure falls back to its title.
 
 ## Sessions
 
@@ -1451,11 +1539,104 @@ figure is about, and both a whole line and a number written over the recipe's
 own come across: the first as `> a comment`, the second as `*a marked span*`.
 
 What comes in is text and stays text — `# title`, `## heading`, `- step`, two
-spaces for a line belonging to the step above it, `>`, `*…*` — so editing it
-here is editing a protocol rather than filling in a form, and editing is also
+spaces for a line belonging to the step above it, `>`, `*…*` — so what is in
+the session is a protocol rather than a filled-in form, and that text is also
 the repair for every heading the reader guessed wrong (which lines are headings
 is a guess; dates and section words are certain, a short line standing over a
 list is not). It is saved in the session.
+
+It opens on **a sheet beside the canvas**, white like the figure page next to
+it, because a protocol is read while the figure is built and a dialog over the
+figure is the wrong shape for that. The **Protocol** tab is that text as the
+document it came from: the steps numbered under their day, each with a field in
+the comment color for what happened at it. Typing in one writes a `>` line into
+the text at that step; emptying it takes the line out again. **Enter in that
+field is another line of the same comment**, because what happened at a step is
+rarely one line — `>` lines in a row are one comment, not several, and the field
+grows with them. The **Text** tab is
+the same thing as the text itself, for a heading the reader got wrong or a
+protocol written from scratch. Nothing a protocol carries can be lost by looking
+at it as a form: the text is the document, and the form is a view of it.
+
+**A protocol imported into a figure that has no panels is a recipe about to be
+run again**, so the last run comes off it on the way in — the comments and the
+marks go, the numbers stay, and the sheet says how many of each it dropped.
+`⌘Z` keeps the day on it. Into a figure with panels it is that experiment's
+record and keeps everything. **`Clear comments`** does the same cleanup on
+demand.
+
+**The prep is scaled by its pellet**, not by a bare number. A protocol is
+written for a pellet of some mass — `written for 12 g`, read off the first mass
+in it and typed over when the protocol means another — and under it is **a row
+per pellet**: what is in it, what it weighs, and the factor the two make. A prep
+day is usually two constructs side by side, so `+ pellet` adds the other one;
+the sheet reads at whichever row has the dot, and the construct is what tells
+the two runs apart. The factor multiplies volumes, masses and moles.
+Concentrations, times, temperatures, speeds, pH and anything written after `at`
+do not move — a prep at twice the volume gets the same 25 mM Tris and the same
+85kg spin — and neither does a number inside a comment or a mark, which is a
+measurement rather than a recipe. **Nor does the sample taken for a gel**: twice
+the pellet is twice the lysate and still the same 20 µL in the well, so a small
+volume in a step that takes a sample is held while the buffer it is eluted with
+scales. The factor is applied to the view and to the export, never to the stored
+text, so **`reset`** is the pellet going back to the mass the protocol was
+written for rather than an edit being undone, and the steps are read-only while
+it is scaled (the comment fields are not — they are this run's). The exported
+document opens with `LRRC8D, 24 g pellet — quantities scaled ×2 from the
+protocol as written (12 g).` in the comment color: a protocol at twice the
+recipe that does not mention it is one nobody can repeat. A container written as
+an amount (`13x350 ml`) is left alone and said so in the bar.
+
+The one thing a number cannot say is where the lysate goes, so a **spin step
+reads its rotor off the volume above it**: `250 mL — one spin in a Ti70 (8 × 39
+mL)`, and at ×2, `500 mL — 2 spins in a Ti45 (420 mL a run)`. Both rotors reach
+well past the 85,000 × g a membrane prep asks for, so capacity is the whole
+question and the smaller one is picked whenever it holds the volume. A rotor
+already written into the step is left alone while it still fits and contradicted
+when it does not. The line is read off the protocol, not written into it: it
+never exports and never scales anything.
+
+**A step that takes a sample reads in blue, and the sample can be linked to its
+lane.** A prep takes a little of itself at every stage — lysate, flow-through,
+wash, eluate — and those are the lanes of the blot further up the page; the
+protocol is where a sample was taken and the figure is what it looked like, and
+which lane is which sample is the one thing neither of them says on its own. The
+row under such a step offers every lane in the figure, by panel letter, and
+linking one writes the sample's name and its lane role onto a lane that has none
+(a lane that already says something keeps what it says). The link goes out with
+the document, as `lysate → (C) lane 2` in the comment color under the step that
+took it. Sample steps are found by what they say — `take`, `keep`, `sample`,
+`aliquot`, with a small volume — so a step that takes one without saying so
+stays black. A second wash is `wash 2`, and that name is what the link is kept
+under, so writing a comment above it does not move it.
+
+**What a line is, is a dropdown.** The words are a guess and a guess can be
+wrong, so every line carries a small selector at its right edge — there when the
+row is hovered or has the cursor in it, invisible otherwise — saying what the
+line is: *instruction*, *detail*, *comment*, *sample taking*. Changing it
+rewrites that line's prefix in the text and nothing else, and a comment of
+several lines moves as the run it is. *Sample taking* is the one that is a
+reading of a step rather than a kind of line: it turns the blue on, offers the
+lane link and holds the gel sample's volume against the scale. The answer is
+kept under the step's own words rather than its line number, so writing a
+comment above it does not lose it, and only an answer that differs from what the
+words already say is stored at all.
+
+**A plate reading belongs to the step that asked for it.** Some preps measure
+fluorescence on the TECAN, and the TECAN answers with a spreadsheet: which
+machine and when, what was measured and how — excitation, emission, gain, the
+temperature in the chamber — and a grid of wells whose numbers mean nothing on
+their own. A step that reads the plate (the machine by name, or measuring
+fluorescence, absorbance, luminescence or OD) reads in blue like a sample step,
+and the row under it takes that file. It is read on the server, where an `.xlsx`
+is a zip of XML like every other document this app reads, and only what it says
+is kept — `Venus, 510/528 nm, gain 100, 29.3 °C — 24 wells, 1–786`. That line
+and the wells themselves, **across the plate rather than down the alphabet**,
+go out as comments under the step. `A280` is deliberately not a plate reading:
+that is the NanoDrop, and the A₂₈₀ panel is where it belongs.
+
+`Clear comments` and an import both take the links, the readings and the pellets
+off with the comments: they were that day's, not the recipe's.
 
 Exporting writes **one document**, `.docx` or `.pdf`: the title, an overview —
 the days, the steps under each and how many of them this experiment had
@@ -1584,6 +1765,17 @@ really in the .docx rather than merely referenced by it. `python3 protocol.py
 some.docx` prints what it reads out of a real one.
 
 ```bash
+python3 tecan.py
+```
+
+reads a Spark result sheet it writes itself: the settings come off labelled
+cells rather than fixed positions, the emission wavelength loses the float noise
+a Spark writes it with (528, not 528.00000000000011), and a plate row that
+starts part way along keeps its own column numbers instead of shifting every
+reading left. `python3 tecan.py some.xlsx` prints what it reads out of a real
+one. The same check runs inside `test_purifig.py`.
+
+```bash
 node test_construct.js
 ```
 
@@ -1636,6 +1828,28 @@ covers what a quantification does with the same label in two lanes of one gel.
 has to give that gel one point at their mean, and either way the gel has to be
 normalized by the mean of its reference lanes — so that loading the control
 twice does not move every other bar.
+
+```bash
+node test_chrom.js
+```
+
+covers the peaks a chromatogram finds for itself, on a trace carrying the zigzag
+that thinning leaves behind: the real peaks have to come back and the six
+hundred teeth must not, a peak a twentieth of the main one has to count while a
+hundredth of it does not, the conductivity must not be what gets read, nothing
+before the injection may be called a peak, and a saturated flat top has to come
+back as one peak marked in its middle rather than two at its edges.
+
+```bash
+node test_boards.js
+```
+
+covers the one thing artboards can get wrong: the panels have to live in exactly
+one place. The board on the canvas keeps them in `doc.nodes` and nothing in its
+own slot -- a second copy there is what a save writes out, stale, on every save
+after -- and a delete has to count the panels on the canvas rather than the
+empty slot they were parked out of, or the board you are looking at goes without
+asking.
 
 The `.clc` check is in `test_purifig.py` instead, because what it is checking is
 a file: bases packed two to a byte have to come back out as the bases that went
