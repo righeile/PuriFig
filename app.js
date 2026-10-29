@@ -8049,6 +8049,20 @@ $('#recent').onchange = ev => {
 // what would land in the file.  Every export finishes the crop first.
 $('#expPdf').onclick = async () => { await endCrop(); await exportPdf(); };
 $('#expSvg').onclick = async () => { await endCrop(); exportSvg(); };
+// Open in omnifig's tab, Send to board hands the figure, as the SVG export
+// makes it, to omnifig's board, which places it as live vector.  Open on its
+// own there is no board, so no button.
+const boardOrigin = window.parent !== window && document.referrer ? new URL(document.referrer).origin : '';
+if (boardOrigin) {
+  const b = document.createElement('button');
+  b.textContent = 'Send to board';
+  b.title = "The figure, as the SVG export makes it, onto omnifig's board as live vector";
+  b.onclick = async () => {
+    await endCrop();
+    window.parent.postMessage({ type: 'board', svg: exportSvgString() }, boardOrigin);
+  };
+  $('#expSvg').after(b);
+}
 $('#expPng').onclick = async () => { await endCrop(); exportPng(+$('#dpi').value); };
 $('#expSource').onclick = async () => {
   await endCrop();
