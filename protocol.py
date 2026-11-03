@@ -44,11 +44,15 @@ BODY_COLORS = {"", "auto", "000000", "0d0d0d", "1a1a1a", "212121", "262626",
 
 #: The words a lab protocol uses as a section, and anything with a date in it.
 SECTION = re.compile(r"^(materials?|idea|aim|goal|procedure|protocol|notes?|"
-                     r"results?|outcome|summary|day\s*\d+|d\d+\b)", re.I)
+                     r"results?|outcome|summary|overview|purification|"
+                     r"expression|day\s*\d+|d\d+\b)", re.I)
 DATE = re.compile(r"\b(\d{8}|\d{4}[-./]\d{1,2}[-./]\d{1,2}|"
                   r"\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4})\b")
 
-KINDS = ("title", "heading", "step", "line", "comment", "blank")
+KINDS = ("title", "heading", "step", "line", "comment", "row", "blank")
+#: A table row: `| a | b | c |`, the outer pipes always there so a cell
+#: that is empty is still a cell.
+ROW = re.compile(r"^\|.*\|$")
 
 
 # --------------------------------------------------------------- reading ----
@@ -77,6 +81,38 @@ def _para(p):
     runs = _runs(p)
     return {"text": re.sub(r"\s+", " ", "".join(t for t, _ in runs)).strip(),
             "runs": runs, "style": style, "listed": listed}
+
+
+def row_cells(text):
+    """The cells of a `| a | b |` row."""
+    return [c.strip() for c in str(text)[1:-1].split("|")]
+
+
+def row_text(cells):
+    return "|" + "|".join(" %s " % c for c in cells) + "|"
+
+
+def _table(tbl):
+    """A Word table as `| a | b | c |` rows, one line each.
+
+    An empty row is kept, unlike an empty paragraph: the one table these
+    protocols carry is the Overview a purification records itself in, columns
+    and a blank row per construct, and those blank rows are the form.
+    """
+    rows = []
+    for tr in tbl.findall(W + "tr"):
+        cells = [re.sub(r"\s+", " ", "".join(n.text or "" for n in tc.iter(W + "t"))).strip()
+                 for tc in tr.findall(W + "tc")]
+        if cells:
+            rows.append(row_text(cells))
+    # A table stands over its own rows the way a heading stands over a list,
+    # which is what `_heading` asks the block after it.
+    return {"rows": rows, "listed": True, "text": ""}
+
+
+def _name(path):
+    """A protocol with no title of its own is titled by its file."""
+    return re.sub(r"[_\s]+", " ", os.path.splitext(os.path.basename(path))[0]).strip()
 
 
 def _inline(runs, body, mark="*"):
@@ -115,39 +151,85 @@ def read_docx(path):
     """A .docx protocol as `{title, text, color}`; `color` is the comments'."""
     with zipfile.ZipFile(path) as z:
         root = ET.fromstring(z.read("word/document.xml"))
-    paras = [_para(p) for p in root.iter(W + "p")]
+    bd = root.find(W + "body")
+    # In document order: a table sits between paragraphs, and a flat sweep of
+    # every `w:p` hands its cells back one line at a time.
+    blocks = [_para(el) if el.tag == W + "p" else _table(el)
+              for el in (root if bd is None else bd)
+              if el.tag in (W + "p", W + "tbl")]
 
     # The body color is whichever one most of the characters are in, so a
     # protocol typed in blue with black comments reads the same way round.
     ink = Counter()
-    for p in paras:
-        for t, c in p["runs"]:
+    for p in blocks:
+        for t, c in p.get("runs", ()):
             ink[c] += len(t.strip())
     body = BODY_COLORS | {(ink.most_common(1)[0][0] if ink else "")}
     comment = next((c for c, _ in ink.most_common() if c not in body), "")
+    # A protocol with two colors in it that are not the body's has one comment
+    # color -- the one with the most ink in it -- and the other is styling: a
+    # red label over a list is not a note about the day.  So everything that is
+    # not the comment color reads as body, and only the comment color marks.
+    if comment:
+        body = (body | set(ink)) - {comment}
 
-    lines, title, blank = [], "", False
-    for i, p in enumerate(paras):
+    # The first line is the title unless it is a label or a section word --
+    # "Plasmids:" over the list of them -- and then the file's own name is the
+    # better title and the label stays the line it is.
+    top = next((i for i, p in enumerate(blocks) if p.get("text")), -1)
+    first = blocks[top]["text"] if top >= 0 else ""
+    titled = bool(first) and not first.endswith(":") and not SECTION.match(first)
+    title = first if titled else _name(path)
+
+    lines, blank = ["# " + title], False
+    for i, p in enumerate(blocks):
+        if "rows" in p:
+            if p["rows"]:
+                if blank and lines:
+                    lines.append("")
+                blank = False
+                lines += p["rows"]
+            continue
         if not p["text"]:
             blank = True
+            continue
+        if titled and i == top:
             continue
         if blank and lines:
             lines.append("")
         blank = False
-        if not title:
-            title = p["text"]
-            lines.append("# " + p["text"])
-        elif _colored(p["runs"], body):
+        if _colored(p["runs"], body):
             lines.append("> " + p["text"])
         elif p["listed"]:
             lines.append("- " + _inline(p["runs"], body))
-        elif _heading(p, paras[i + 1] if i + 1 < len(paras) else None):
+        elif _heading(p, blocks[i + 1] if i + 1 < len(blocks) else None):
             lines.append("")
             lines.append("## " + _inline(p["runs"], body))
         else:
             lines.append("  " + _inline(p["runs"], body))
     return {"title": title, "text": "\n".join(lines).strip() + "\n",
             "color": comment or "FF0000"}
+
+
+def read(path):
+    """A protocol file as `{title, text, color}`.
+
+    The library is a folder of protocol files, so an entry is either a Word
+    protocol copied straight in -- which is how the lab's own 22 get there --
+    or this text, which is what the app writes.  The extension says which, and
+    the text needs no reading beyond itself: it is the model both ends already
+    speak.  Its title is its own first `# ` line, falling back to the file
+    name, because a protocol saved out of a figure may never have had one.
+    """
+    if path.lower().endswith(".docx"):
+        return read_docx(path)
+    with io.open(path, encoding="utf-8") as fh:
+        text = fh.read()
+    title = next((ln[2:].strip() for ln in text.splitlines()
+                  if ln.startswith("# ")), "")
+    return {"title": title or os.path.splitext(os.path.basename(path))[0],
+            "text": text if text.endswith("\n") else text + "\n",
+            "color": "FF0000"}
 
 
 def _heading(p, nxt=None):
@@ -193,6 +275,8 @@ def parse(text):
             kind, s = "comment", s[2:]
         elif s[0] in "-*•" and s[1:2] in (" ", "\t"):
             kind, s = "step", s[1:].strip()
+        elif ROW.match(s):
+            kind = "row"
         else:
             kind = "line" if raw[:1] in (" ", "\t") else "step"
         d = DATE.search(s)
@@ -314,10 +398,57 @@ def _image_p(mm_w, mm_h):
         '</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>')
 
 
+def tables(items):
+    """Runs of `row` items, as `{index of the first: [[cell, ...], ...]}`.
+
+    Consecutive rows are one table -- a blank line between two of them makes
+    two tables, which is what a blank line does to everything else here."""
+    out, i = {}, 0
+    while i < len(items):
+        if items[i]["kind"] == "row":
+            j = i
+            while j < len(items) and items[j]["kind"] == "row":
+                j += 1
+            out[i] = [row_cells(items[k]["text"]) for k in range(i, j)]
+            i = j
+        else:
+            i += 1
+    return out
+
+
+_BORDER = "".join(
+    '<w:%s w:val="single" w:sz="4" w:space="0" w:color="BFBFBF"/>' % e
+    for e in ("top", "left", "bottom", "right", "insideH", "insideV"))
+
+
+def _tbl(rows, size=8.0):
+    """A real Word table.  Word sizes the columns: `autofit` across the page
+    width beats any width this could compute from the text."""
+    wide = max(len(r) for r in rows)
+    out = ['<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/><w:tblBorders>'
+           + _BORDER + '</w:tblBorders><w:tblLayout w:type="autofit"/>'
+           "</w:tblPr><w:tblGrid>"
+           + '<w:gridCol w:w="%d"/>' % (9070 // wide) * wide + "</w:tblGrid>"]
+    for r, cells in enumerate(rows):
+        out.append("<w:tr>")
+        for c in range(wide):
+            out.append('<w:tc><w:tcPr><w:tcW w:w="0" w:type="auto"/></w:tcPr>'
+                       + _p(cells[c] if c < len(cells) else "", size=size,
+                            bold=(r == 0)) + "</w:tc>")
+        out.append("</w:tr>")
+    out.append("</w:tbl>")
+    # Word needs a paragraph after a table, or the next table joins it.
+    return "".join(out) + _p("", size=4)
+
+
 def _blocks(items, color):
-    out = []
-    for it in items:
+    out, tabs = [], tables(items)
+    for i, it in enumerate(items):
         k, t = it["kind"], it["text"]
+        if k == "row":
+            if i in tabs:
+                out.append(_tbl(tabs[i]))
+            continue
         if k in ("blank", "title"):
             continue
         if k == "heading":
@@ -450,8 +581,37 @@ def write_pdf(path, text, png=None, png_mm=None, figure=(), caption="",
 
         page()
         line("Protocol", size=12, bold=True)
-        for it in items:
+        tabs = tables(items)
+
+        def table(rows, size=6.5):
+            """Cells at fixed columns, their widths shared out by the longest
+            text in each -- a table does not wrap, it is read across."""
+            wide = max(len(r) for r in rows)
+            want = [max((len(r[c]) if c < len(r) else 0) for r in rows) + 1.5
+                    for c in range(wide)]
+            span = PW - 2 * M - 2
+            xs, run = [], 0.0
+            for w in want:
+                xs.append(M + span * run / sum(want))
+                run += w
+            for r, cells in enumerate(rows):
+                state["y"] += size * 0.3528 * 1.9
+                if state["y"] > PH - M:
+                    page()
+                    state["y"] += size * 0.3528 * 1.9
+                for c, x in enumerate(xs):
+                    if c < len(cells) and cells[c]:
+                        state["fig"].text(x / PW, 1 - state["y"] / PH, cells[c],
+                                          fontsize=size, ha="left", va="baseline",
+                                          fontweight="bold" if r == 0 else "normal")
+            state["y"] += size * 0.3528
+
+        for i, it in enumerate(items):
             k, t = it["kind"], it["text"]
+            if k == "row":
+                if i in tabs:
+                    table(tabs[i])
+                continue
             if k in ("blank", "title"):
                 continue
             if k == "heading":

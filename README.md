@@ -60,6 +60,7 @@ trace shades those volumes and no others.
 | ctrl-drag | move a panel, from anywhere on it |
 | double-click | edit a box's text in place |
 | ⌘D ⌘A | duplicate · select all |
+| arrows ⇧arrows | nudge the selection half a millimeter · ten of them |
 | ⌘S ⇧⌘S ⌘O | save the session · save as… · open |
 | ⌘Z ⇧⌘Z | undo · redo (⌃Z / ⌃Y on Windows) |
 
@@ -320,6 +321,15 @@ left a tray of seven membranes to be cut out of a picture in which six of them
 are blank. Enter or `done` keeps it; Escape puts back the crop you started with.
 A whole cropping session is one step to undo, however many times you nudged an
 edge.
+
+**What you select is what the panel shows.** A crop is a frame somebody chose,
+so the panel is drawn to it, margins and all -- the rectangle dragged in the
+crop view is the rectangle that comes back. An *uncropped* scan is cut to its
+block of lanes instead, because what lies beyond the outermost lane of a whole
+scan is scanner bed; `show … the whole picture` turns that off for a panel that
+has no crop. A splice is the exception either way: a picture with a lane taken
+out of it is drawn as its runs, since the whole of it is exactly what is not
+being shown.
 
 **`find the gel`** detects the outline for you. Each side is judged on its own,
 from the outside in, because a gel is not necessarily in the middle of its scan
@@ -684,8 +694,8 @@ A membrane is wider than the piece of it the figure showed, so its lanes sit
 closer together: a lane label wider than its own lane is slanted rather than
 printed over its neighbors, and the panel's title goes above whatever the
 labels actually reach, a slanted row included. In the crop fold,
-**`show … the whole picture`** and **`region used … outline it`** are the two
-switches by hand, on any panel.
+**`show … the whole picture`** -- which a cropped panel does anyway -- and
+**`region used … outline it`** are the two switches by hand, on any panel.
 
 The sheet is a canvas like any other — move, resize, relabel, add text, export.
 Exports are named for the board showing: `figure.svg` and `supplementary.svg`,
@@ -712,6 +722,15 @@ from the right answer, where one shared box put every lane within half a
 percent. A click that finds no band does not set the size; it is measured where
 you clicked, flagged, and the first band that can actually be seen sets it.
 
+**The size is yours to override.** A box's top and bottom edges are grips: drag
+one and the edge under the hand moves while the other stays, so the box grows
+the way the hand does. The height is the row's, so every lane's box is resized
+with it, about its own center -- what differs between the lanes is where a box
+sits, which is each band's own. The same number is typed in the field beside the
+row. A box fitted to the band it was found on takes in half of one band and none
+of the other where there is a doublet, a smear, or a band running into the one
+above, and that is a judgement the person who ran the gel has to be able to make.
+
 **What is measured.** The integrated signal in the box less its background, on
 the original data: the counts as recorded for a light-on-dark image, inverted
 against full scale for a dark-on-light one. The display window, γ and invert do
@@ -729,6 +748,38 @@ Background is taken one of two ways, both local to the lane:
 
 Nothing is clipped at zero. An empty box measures as roughly nothing, sometimes
 a little below, and that is the honest answer.
+
+**Where it ran, beside how much of it there is.** Each box's apparent size
+stands in the per-lane table next to its signal, read off this gel's own ladder
+at the row the box sits on, straight in log(size) between the two rungs either
+side -- the same rule, and the same number, as the `size` readout of a
+quantification panel. Type the rungs' sizes under `size standards` and the
+column is there; past the ends of the ladder the cell is empty rather than
+extrapolated.
+
+**Which row, though.** A box dragged by one edge takes its center with it, so
+the size follows where the box ended up -- right while the box sits as it was
+fitted, wrong as soon as it has been opened out to one side to take in a smear.
+`size at` is the answer: **box center** reads the middle of the box, which is the
+default and the box's own answer; **band center** reads the row the band was
+found at when the box was placed. The two are the same row the moment a band is
+clicked, since the search centers the box between the band's two ends; they part
+company only when a box is reshaped by hand, and then only the box's middle
+moves. It moves no box and changes no signal, only the row the ladder is read at,
+and it applies to the per-lane table and to a quantification panel's `size`
+readout alike -- they are the same number and must stay so.
+
+The row is the search's answer, kept, rather than the band looked for again
+inside the box: looking again is what moves it. The darkest row in a box is not
+the band either -- a band exposed past the camera's range has a flat top whose
+first row `argmax` takes, and a box edge cutting into the flank of the next band
+down is the highest row in the box without being a peak at all -- and on a faint
+band the search's own three-sigma gate flips between the band and the box with
+nothing but the box's height, which is a measurement that moves when nothing
+about the blot has. So: a box moved bodily carries the row with it, a box resized
+leaves it where it was, and a box that was never searched -- a whole lane, or one
+measured before the setting existed -- has no row of its own and reads its
+middle, which is what it was measured as.
 
 **Purity: the whole lane.** `whole lanes` measures every lane that holds a
 sample floor to ceiling, as one box — the same picture, the same background
@@ -1174,6 +1225,27 @@ If the sequence is not to hand, type the mass and ε — or A 0.1% directly. A t
 value wins, because someone who measured their own coefficient knows something
 the sequence does not.
 
+**A complex is several chains, usually from several plasmids.** Paste a
+multi-FASTA and each record becomes a chain; write the copy number in the
+header — `>LRRC8A ×4`, `4× LRRC8A`, `(4)`, `2 copies` — and it is read as the
+stoichiometry. `+ a chain from` takes a chain off a construct panel already on
+the canvas, which is what the plasmid makes: its largest piece after the
+protease, with the residues when the panel has them. Beer–Lambert is additive
+in chromophores and mass is additive in atoms, so **ε = Σ nᵢ·εᵢ** and
+**M = Σ nᵢ·Mᵢ**, and A 0.1% is their ratio — the mass-weighted average of the
+chains'. A homo-oligomer therefore has its monomer's A 0.1% exactly and only
+its µM moves; a hetero-complex has neither chain's, which is the number people
+get wrong by reaching for the subunit they happen to have open. One chain with
+no coefficient leaves the complex with none: two thirds of an ε is not an ε,
+and the panel says so rather than printing a concentration that is low by a
+third. What the sum does not know: a disulfide between two chains (no single
+chain sees that cystine, +125 M⁻¹cm⁻¹), a bound nucleotide, heme or any other
+non-protein chromophore, and whether the stoichiometry is the one in the tube.
+A measured coefficient still wins, typed on the complex or on any one chain.
+The assumed stoichiometry is printed on the panel, in the legend draft and in
+`Integrity…`, because it is the part of the number a reader has to be able to
+disagree with.
+
 **Why this panel exists.** A NanoDrop left on "1 Abs = 1 mg/mL" reports a
 concentration wrong by the ratio between that and the real A 0.1% — for the
 nanobody in the example, by a factor of 2.25, in the direction of *more protein
@@ -1393,6 +1465,20 @@ a lane label reading `ΔTM2–3 (E273Q)` reserves the width it will really take.
 alignment is one undo step, and one that would move nothing says so instead of
 banking an empty step.
 
+**Even across** and **even down** space three or more panels at equal gaps,
+leaving the outermost two where they are, since those are the ones set against
+the page margins. The gap it settled on is reported, and if the panels do not
+fit it says by how much they overlap rather than silently stacking them.
+
+For one panel at a time there are no buttons: **drag it and it lines itself
+up.** While a panel moves, every edge and center of the panels around it is a
+line it can land on, and the one it lands on is drawn in red so there is no
+guessing which. The pull is five screen pixels, so it is a zoom-independent
+flick rather than a magnet to fight, and it is the **snap** toggle that governs
+it — turn snap off and a panel goes exactly where it is dropped. The **arrow
+keys** then nudge the selection half a millimeter at a time, ten with shift, for
+the last bit that no edge is a reference for.
+
 ## The pasteboard
 
 Anything entirely off the page is on the pasteboard: drawn on screen on a white
@@ -1565,6 +1651,20 @@ marks go, the numbers stay, and the sheet says how many of each it dropped.
 record and keeps everything. **`Clear comments`** does the same cleanup on
 demand.
 
+**The library is a folder of protocols** and nothing else. `Library…` is what
+is in `~/.purifig/protocols`, and picking one reads it in exactly as the Word
+import does — the extension is all that tells a Word protocol from the text the
+app writes. The file is the entry and its name is the entry's name, so a
+protocol goes in by being copied there: the lab's own templates are a library
+the moment the folder holds them, and the folder can be a symlink to wherever
+they already live. There is no index to drift out of step with what is in it,
+and backing it up is copying a folder. **`Save to library`** keeps the protocol
+in hand under its own title; a name already there is never written over, the
+same name twice is kept beside the first as `-2`, because a protocol is not
+cheap to repeat. Word's own `~$name.docx` lock files are not entries.
+`--state` moves the folder, which is how a test instance cannot write the real
+one.
+
 **The prep is scaled by its pellet**, not by a bare number. A protocol is
 written for a pellet of some mass — `written for 12 g`, read off the first mass
 in it and typed over when the protocol means another — and under it is **a row
@@ -1727,7 +1827,6 @@ an empty gel panel waiting for that TIFF.
 - UNICORN 5/6 `.zip` results — a different container from the 3.x `.RES` here
 - Peak integration: areas and a percentage per peak, from the trace rather than
   from UNICORN's own evaluation
-- Distributing panels at equal spacing, alongside aligning them
 - Aligning to a nominated panel rather than to the outermost one in the selection
 - Total-protein normalization — dividing by a stain-free or Ponceau image of the
   whole lane rather than by one housekeeping band

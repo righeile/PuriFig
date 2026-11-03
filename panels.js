@@ -156,10 +156,11 @@ function gelExtras() {
     // carry one: a sheet of uncropped blots exists to say which part of each
     // went into the figure, and one that does not say it is just more pictures.
     cropBox: null, showCrop: true,
-    // Draw the whole picture rather than the block of lanes on it.  A panel is
-    // normally cut to its lanes, which is right for a figure -- what is beside
+    // Draw the whole picture rather than the block of lanes on it.  An uncropped
+    // scan is cut to its lanes, which is right for a figure -- what is beside
     // the outermost lane is scanner bed.  A supplementary sheet of whole blots
-    // is the case where the membrane's own edges are the point.
+    // is the case where the membrane's own edges are the point.  A panel with a
+    // crop on it is already drawn to the crop, which is a frame somebody chose.
     showAll: false,
     // The blank strip down each side of a piece with no comb, in lanes.  Ten
     // lanes means ten lanes: laid edge to edge, two of the ten are margin.
@@ -310,9 +311,15 @@ function gelLayout(n) {
   let cursor = 0;
   const segs = runs.map((run, i) => {
     let x0 = run.lanes[0].x0, x1 = run.lanes[run.lanes.length - 1].x1;
-    // `showAll` widens the one segment to the whole picture; the lanes keep
-    // their own positions inside it, being measured from the segment's start.
-    if (n.showAll && runs.length === 1) { x0 = 0; x1 = n.imgW || x1; }
+    // The one segment is widened to the whole picture -- the lanes keeping their
+    // own positions inside it, being measured from the segment's start -- when
+    // `showAll` says so, and whenever the picture is a crop somebody drew.  A
+    // crop is a frame that was chosen: trimming it again to the outermost lane
+    // means the rectangle dragged in the crop view is not the rectangle that
+    // comes back, and the margin it loses is the margin that was deliberately
+    // left.  Cut to the lanes is for the uncropped scan, where what lies beyond
+    // them really is scanner bed.
+    if ((n.showAll || n.crop) && runs.length === 1) { x0 = 0; x1 = n.imgW || x1; }
     const seg = { x0, x1, xmm: cursor, wmm: (x1 - x0) * s, run, spliceBefore: i > 0 };
     run.lanes.forEach(l => {
       l._xmm = cursor + (l.x0 - x0) * s;
@@ -910,8 +917,25 @@ function renderGelOverlay(n, active) {
         // doublet is not always the row meant, and there was no way to say so.
         out += `<polygon class="bandhit" data-band="${b.id}" points="${para(x, w, r, ya, yz)}" ` +
                `fill="${col}" fill-opacity="0.08" stroke="${col}" stroke-width="0.16" ` +
-               `style="cursor:ns-resize"/>`;
+               `style="cursor:grab"/>`;
       });
+      // Its top and bottom are grips as well, so how much of a band is taken in
+      // can be said by hand: the search sizes the box to the band it found,
+      // which on a doublet, a smear or a band running into the one above takes
+      // in half of one and none of the other.  The height is the row's, so
+      // dragging an edge resizes every lane's box with it -- boxes of different
+      // sizes take in different fractions of their bands and the lanes stop
+      // being comparable.
+      if (b.h > 0) {
+        [[a, 0], [z, 1]].forEach(([y, end]) => {
+          const rr = rows.find(r => y >= r.y0 && y <= r.y1);
+          if (!rr) return;
+          const g = 0.45 / (L.s || 1);
+          out += `<polygon class="bandedge" data-band="${b.id}" data-end="${end}" ` +
+                 `points="${para(x, w, rr, Math.max(y - g, rr.y0), Math.min(y + g, rr.y1))}" ` +
+                 `fill="transparent" style="cursor:ns-resize"/>`;
+        });
+      }
       const ymm = gelYmm(n, clamp(a, 0, n.imgH), rows, L);
       if (ymm === null) return;
       const said = b.sat ? 'sat' : b.weak ? '?' :
@@ -1042,6 +1066,26 @@ function quantBoxX(n, lane) {
   const w = lane.x1 - lane.x0, k = clamp(nn(n.quant.inset) ?? 0.05, 0, 0.45);
   return [lane.x0 + w * k, lane.x1 - w * k];
 }
+
+/** A box resized by one of its edges: the edge under the hand moves by `d` crop
+ *  rows and the other one stays, so the height changes by `d` and the center by
+ *  half of it.  `end` is 0 for the top edge, 1 for the bottom.  Resizing about
+ *  the center instead would walk the box off its band and onto the one above. */
+function quantResize(y0, h0, d, end, imgH) {
+  const h = clamp(Math.round(h0 + d * (end ? 1 : -1)), 4, imgH || h0);
+  return { y: r2(y0 + (h - h0) / 2 * (end ? 1 : -1)), h };
+}
+
+/** The crop row a band's apparent size is read at: the middle of its box, or --
+ *  where the blot says so -- the row the band was found at when the box was
+ *  placed.  They are the same row the moment a box is clicked, since the search
+ *  centers the box between the band's two ends; they part company only when the
+ *  box is opened out to one side by hand, where the box's middle walks with the
+ *  edge under the hand and the band's row stays on the band.  A box measured
+ *  before the question was asked has no row of its own and reads its middle,
+ *  which is what it was measured as. */
+const quantSizeY = (n, b) =>
+  (n.quant.sizeAt === 'band center' && b && b.bandY != null ? b.bandY : b && b.y);
 
 /** Lanes a band can be measured in: not the ladder, not a blank. */
 const quantLane = l => l.role !== 'ladder' && l.role !== 'blank';
@@ -1221,6 +1265,38 @@ function columnFacts(c) {
 
 const TRACE_COLOURS = ['#000000', '#c62f34', '#5f6772', '#2c7fb8', '#c8935f'];
 
+/** Where a chromatogram's key may sit. */
+const LEGEND_PLACES = ['none', 'top left', 'top right', 'bottom left', 'bottom right'];
+
+/* The key to the curves, drawn inside the plot.  Four traces laid over each
+   other cannot be told apart without one, and naming them in the caption
+   instead is read after the eye has already matched them up its own way.
+   Which corner is the user's call: the empty corner is a fact about the run,
+   and what a key must not cover is the peaks. */
+function chromLegend(n, pt) {
+  const where = n.legend || 'none';
+  if (where === 'none') return '';
+  const rows = n.traces.filter(t => t.on !== false && String(t.name || '').trim());
+  if (!rows.length) return '';
+  const lp = pt * 0.95;                    // just under the tick numbers
+  const lh = lp * PT * 1.35;
+  const rule = 3.2, gap = 1.0, pad = 1.0;  // sample line, its gap, inset, in mm
+  const wide = Math.max(...rows.map(t => String(t.name).length)) * lp * PT * 0.58;
+  const w = rule + gap + wide, h = rows.length * lh;
+  const x = where.endsWith('left') ? n.x + pad : n.x + n.w - pad - w;
+  const y = where.startsWith('top') ? n.y + pad : n.y + n.h - pad - h;
+  // Laid on paper rather than on the curves: a key a trace runs through is no
+  // key.  Not quite opaque, so what it covers can still be seen to be there.
+  let out = rect(x - 0.6, y - 0.4, w + 1.2, h + 0.8, { fill: '#fff', opacity: 0.85 });
+  rows.forEach((t, i) => {
+    const cy = y + i * lh + lh * 0.5;
+    out += line(x, cy, x + rule, cy, t.width || n.traceMm, t.color,
+                t.dash ? ` stroke-dasharray="${t.dash}"` : '');
+    out += txt(x + rule + gap, cy + lp * PT * 0.35, t.name, { pt: lp, anchor: 'start' });
+  });
+  return out;
+}
+
 //: How far above the curve a peak label starts, in mm.
 const PEAK_GAP = 2.0;
 
@@ -1256,6 +1332,7 @@ function chromNode(x, y) {
     normalise: 'none',
     fontPt: 6.5, axisMm: 0.25, tickMm: 1.1, traceMm: 0.4,
     frame: 'lb',                         // which axes get a spine
+    legend: 'none',                      // the key to the curves, and its corner
     column: { name: DEFAULT_COLUMN, ...columnDefaults(DEFAULT_COLUMN), flow: 0.5, buffer: '' },
     marks: { v0: true, vt: false, inject: true },
     inject: null,                        // where the sample went on, in the run's own frame
@@ -1317,9 +1394,27 @@ function chromScales(n) {
   return { X, Y, Y2, xmin, xmax, ymin, ymax, y2min, y2max };
 }
 
+/* A curve's own maximum.  The importer used to be the only thing that worked
+   one out, so a trace that arrived any other way -- a session written by
+   another tool, a CSV pasted in -- carried none, and normalising to the
+   maximum quietly did nothing at all.  It is a property of the points, so it
+   is read off them when it is missing, and kept, since it cannot change
+   unless they do. */
+function traceMax(t) {
+  if (!(t._max > 0) && t.pts && t.pts.length) {
+    let m = -Infinity;
+    for (const p of t.pts) if (p[1] > m) m = p[1];
+    t._max = m;
+  }
+  return t._max;
+}
+
 function normY(t, v, n) {
-  if (n.normalise === 'max' && t._max) return v / t._max * 100;
-  return v;
+  if (n.normalise !== 'max') return v;
+  const m = traceMax(t);
+  // A curve that never rises above zero has no maximum to divide by: scaling
+  // it by a negative number would turn it upside down.
+  return m > 0 ? v / m * 100 : v;
 }
 
 function niceTicks(lo, hi, target = 5) {
@@ -1881,6 +1976,9 @@ function renderChrom(n) {
     out += txtLines(x, y - PEAK_GAP - (lines.length - 1) * lh, lines, { pt, lineHeight: 1.15 });
   });
 
+  // Last, so it sits on everything it was put in a corner to stay clear of.
+  out += chromLegend(n, pt);
+
   return out;
 }
 
@@ -2096,6 +2194,9 @@ function nanodropHeadline(n) {
   if (k.a01 === null) return 'no extinction coefficient — paste a sequence or type A 0.1%';
   const bits = [];
   if (n.protein.name) bits.push(n.protein.name);
+  // Which chains, and how many of each: an ε summed over a stoichiometry is
+  // only checkable if the page says what the stoichiometry was.
+  if (k.parts) bits.push(protStoich(k));
   if (k.pp) bits.push(`${k.pp.n} aa`);
   if (k.mw) bits.push(`${r2(k.mw / 1000)} kDa`);
   if (k.eps !== null) bits.push(`ε₂₈₀ ${Math.round(k.eps)} M⁻¹cm⁻¹`);
@@ -2429,7 +2530,7 @@ function quantData(q) {
         // stay comparable, but where the box sits is each band's own, and that
         // is the whole measurement.  Between the two rungs either side, in
         // log(size), so a gradient gel is followed rung by rung.
-        row.value = gelKDaAtY(g, tb.y);
+        row.value = gelKDaAtY(g, quantSizeY(g, tb));
         if (row.value === null) row.why.push('past the end of the ladder, so it has no size');
       } else if (D.readout === 'share') {
         // The bands this protein runs as are the whole of it, so each is a
@@ -2518,7 +2619,7 @@ function quantData(q) {
     if (D.readout !== 'intensity') by = 1;       // a kilodalton and a percentage are both already absolute
     else if (q.norm === 'ref') {
       // Every chosen control has to be on the blot.  A blot carrying one of two
-      // controls would be divided by that one while its neighbour is divided by
+      // controls would be divided by that one while its neighbor is divided by
       // the pair's mean, and the two blots would no longer be on one scale --
       // which is the whole reason anything is divided at all.
       const missing = D.refs.filter(r => !(rep.vals[r] && rep.vals[r].raw > 0));
@@ -2620,6 +2721,19 @@ function quantFit(q, k) {
   return q[key];
 }
 
+/** Type the axis the bars pin, and the bar width follows.
+ *
+ *  A figure is sometimes drawn to a given plotting area -- a journal's column,
+ *  a row of panels that has to line up -- and that is a statement about the
+ *  box, not about the bar.  The bar stays the invariant underneath: derived
+ *  from the box and the condition count, it is what `quantFit` draws from
+ *  next time, so the box survives a reopen instead of springing back. */
+function quantSetAxis(q, mm, k) {
+  if (!(mm > 0)) return;
+  q.barMm = Math.round(mm * QUANT_FILL / Math.max(1, k) * 1e4) / 1e4;
+  quantFit(q, k);
+}
+
 /** What one condition's bar is filled with: a per-condition override, else the
  *  palette's color for its position, else the one `barFill`. */
 function quantFillFor(q, name, i) {
@@ -2628,7 +2742,7 @@ function quantFillFor(q, name, i) {
   return q.barFill || '#c8c8c8';
 }
 
-/** The value at fraction *f* of *sorted*, interpolated between neighbours --
+/** The value at fraction *f* of *sorted*, interpolated between neighbors --
  *  numpy's default and R's type 7, so a box drawn here is the box drawn there. */
 function quantile(sorted, f) {
   const i = (sorted.length - 1) * f, lo = Math.floor(i);
@@ -2682,11 +2796,17 @@ function quantLayout(q) {
   // Across, a condition has the whole left margin to itself and never tilts;
   // that is most of why a figure of long names is drawn this way.
   const tilt = !hz && wide > slot * 0.94;
+  // A tick per condition, the way the value axis has one per number.  Without
+  // them the names float beside a bare spine and which name goes with which
+  // bar is read by eye -- and matplotlib, which labkit prints the same figure
+  // with, draws them.  The labels then start outside the tick, as the value
+  // numbers already do.
+  const cticks = D.conditions.map((c, i) => C(i));
   const xlabels = D.conditions.map((c, i) => {
     const p = C(i);
-    if (hz) return { text: c, x: q.x - 1.0, y: p + pt * PT * 0.35, anchor: 'end', rotate: 0 };
-    return tilt ? { text: c, x: p + pt * PT * 0.3, y: q.y + q.h + 1.2, anchor: 'end', rotate: -45 }
-                : { text: c, x: p, y: q.y + q.h + 1.0 + pt * PT * 0.95, anchor: 'middle', rotate: 0 };
+    if (hz) return { text: c, x: q.x - q.tickMm - 0.5, y: p + pt * PT * 0.35, anchor: 'end', rotate: 0 };
+    return tilt ? { text: c, x: p + pt * PT * 0.3, y: q.y + q.h + q.tickMm + 0.1, anchor: 'end', rotate: -45 }
+                : { text: c, x: p, y: q.y + q.h + q.tickMm + pt * PT * 0.95, anchor: 'middle', rotate: 0 };
   });
   const tickW = Math.max(0, ...ticks.map(v => textWmm(fmtTick(v), pt)));
   const ylines = quantYLabel(q, D).split('\n');
@@ -2742,7 +2862,7 @@ function quantLayout(q) {
       }) : [],
     };
   });
-  return { D, pt, Y, hz, ymin, ymax, ticks, slot, bw, w, xlabels, tilt, ylabel, groups };
+  return { D, pt, Y, hz, ymin, ymax, ticks, cticks, slot, bw, w, xlabels, tilt, ylabel, groups };
 }
 
 /** One point of the graph, shaped by which blot it came from.
@@ -2856,6 +2976,8 @@ function renderQuant(q) {
       out += txt(q.x - q.tickMm - 0.5, a + pt * PT * 0.35, fmtTick(v), { pt, anchor: 'end' });
     }
   });
+  Lq.cticks.forEach(a => out += hz ? line(q.x - q.tickMm, a, q.x, a, q.axisMm)
+                                   : line(a, q.y + q.h, a, q.y + q.h + q.tickMm, q.axisMm));
   Lq.xlabels.forEach(l => {
     out += txt(l.x, l.y, l.text, { pt, anchor: l.anchor, rotate: l.rotate });
   });
@@ -2986,6 +3108,23 @@ function constructPieces(n) {
 }
 
 const constructWhole = n => piece(n.segs || []);
+
+/** The chain a construct panel puts in the tube, as a complex's subunit.
+ *
+ *  Which piece that is is the same judgement the Overview table makes: what
+ *  came off the column after the protease, so the largest piece when the
+ *  construct is cleaved and the whole chain when it is not.  The residues come
+ *  with it only when every segment had them -- a segment given as a length has
+ *  no tryptophans to count, so such a chain carries its mass and leaves the
+ *  complex without an ε rather than with a wrong one. */
+function constructChain(cn) {
+  const parts = constructPieces(cn);
+  const q = parts.length > 1 ? parts.reduce((a, b) => (b.n > a.n ? b : a)) : constructWhole(cn);
+  if (!q || !q.n) return null;
+  return { name: String(cn.title || '').trim(), n: 1,
+           seq: q.exact ? q.segs.map(segSeqOf).join('') : '',
+           mw: q.exact ? null : q.da };
+}
 
 /** One chain the server read off a plasmid map, put into a construct panel.
  *

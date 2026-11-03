@@ -287,6 +287,37 @@ assert.ok(Math.abs((LH.groups[1].cx - LH.groups[0].cx) - LH.slot) < 1e-9);
 assert.strictEqual(LH.tilt, false, 'a condition was tilted on a horizontal panel');
 LH.xlabels.forEach(l => assert.strictEqual(l.rotate, 0, 'a tilted label across'));
 assert.strictEqual(LH.ylabel.rotate, 0, 'the value label is still on its side');
+/* ---- the plotting area can be typed ---- */
+
+// 0.93 x 0.77 in of plotting area, which is what a journal asks for, through
+// the bar width the panel actually stores.  It comes back the size it was
+// asked for, and still the size it was asked for after a redraw.
+const spec = panel({ gels: ['s'], horizontal: true, w: 23.622, h: 44 });
+PF.doc = { nodes: [two, seven, spec] };
+quantSetAxis(spec, 19.558, quantData(spec).conditions.length);
+assert.ok(Math.abs(spec.h - 19.558) < 0.01, `the typed axis came back ${spec.h} mm`);
+quantLayout(spec);
+assert.ok(Math.abs(spec.h - 19.558) < 0.01, `a redraw put the axis back to ${spec.h} mm`);
+assert.ok(Math.abs(quantLayout(spec).slot * 7 - 19.558) < 0.01, 'the conditions do not fill it');
+PF.doc = { nodes: [two, seven, q7h] };
+
+/* ---- a tick per condition ---- */
+
+// One tick per condition on the category axis, at the bar's own center, and
+// the name outside it rather than on top of it.  Both ways round.
+assert.deepStrictEqual(LH.cticks, LH.groups.map(g => g.cx),
+                       'across: the category ticks are not at the bars');
+LH.xlabels.forEach(l => assert.ok(l.x <= q7h.x - q7h.tickMm + 1e-9,
+                                  `across: the label at ${l.x} is drawn over its tick`));
+const up = panel({ gels: ['t'], w: 44, h: 30.48 });
+PF.doc = { nodes: [two, seven, up] };
+const LU = quantLayout(up);
+assert.deepStrictEqual(LU.cticks, LU.groups.map(g => g.cx),
+                       'up: the category ticks are not at the bars');
+LU.xlabels.forEach(l => assert.ok(l.y >= up.y + up.h + up.tickMm - 1e-9,
+                                  `up: the label at ${l.y} is drawn over its tick`));
+PF.doc = { nodes: [two, seven, q7h] };
+
 // Turning it back gives the vertical panel exactly.
 const back = quantLayout(panel({ gels: ['s'], w: 44, h: 30.48 }));
 assert.ok(Math.abs(back.bw - LH.bw) < 1e-9);
@@ -503,5 +534,47 @@ assert.ok(!quantData(qc).perUl, 'a ratio to a loading control is not per µL');
 const qsh = { ...qu, gels: ['u3'], readout: 'share', target: 'intermediate' };
 assert.ok(Math.abs(quantData(qsh).summary['mutant'].vals[0] - 10) < 1e-9,
           quantData(qsh).summary['mutant'].vals);
+
+/* ---- a box resized by one of its edges ---- */
+// The edge under the hand moves with the hand and the other one stays, so the
+// height changes by the whole drag and the center by half of it.  Resizing
+// about the center instead would take in the band above as fast as the one
+// being measured, and the sign of the half-shift is exactly the kind of thing
+// that silently goes the wrong way.
+{
+  const bot = quantResize(200, 20, 10, 1, 400);         // bottom edge, dragged down
+  assert.deepStrictEqual(bot, { y: 205, h: 30 });
+  const top = quantResize(200, 20, 10, 0, 400);         // top edge, dragged down
+  assert.deepStrictEqual(top, { y: 205, h: 10 });
+  assert.strictEqual(bot.y + bot.h / 2, 220, 'the bottom edge did not follow the hand');
+  assert.strictEqual(top.y - top.h / 2, 200, 'the top edge did not follow the hand');
+  // Four rows is the floor, and the edge left alone stays where it was.
+  const tiny = quantResize(200, 20, -40, 1, 400);
+  assert.deepStrictEqual(tiny, { y: 192, h: 4 });
+  assert.strictEqual(tiny.y - tiny.h / 2, 190, 'the top edge moved when the box bottomed out');
+  // A row's height is one number, so every box in it is resized; what differs
+  // between the lanes is where the box sits, which is each band's own.
+  assert.strictEqual(quantResize(260, 20, 10, 1, 400).h, bot.h);
+}
+
+/* ---- which row a size is read at ---- */
+// `size at` names the row the ladder is read at: the middle of the box, or the
+// middle of the band found inside it -- the same row until the box is opened out
+// to one side, after which only the box's middle moves.  A band measured before
+// the question was asked has no row of its own recorded, and keeps the answer it
+// was measured with rather than losing its size.
+{
+  const g = blot('p1', 'blot', [200, 200]);          // both boxes on the 50 kDa rung
+  g.quant.bands[0].bandY = 250;                      // the box was opened downwards; the band was not
+  const pq = { ...q, gels: ['p1'], readout: 'size' };
+  PF.doc = { nodes: [g, pq] };
+  assert.ok(Math.abs(quantData(pq).summary['wild type'].vals[0] - 50) < 0.01,
+            'the middle of the box is what a blot says by default');
+  g.quant.sizeAt = 'band center';
+  assert.ok(Math.abs(quantData(pq).summary['wild type'].vals[0] - 50 / Math.SQRT2) < 0.01,
+            quantData(pq).summary['wild type'].vals);
+  assert.ok(Math.abs(quantData(pq).summary['mutant'].vals[0] - 50) < 0.01,
+            'a band with no row of its own lost its size');
+}
 
 console.log('ok');

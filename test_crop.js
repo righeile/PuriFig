@@ -35,9 +35,14 @@ assert.ok(Math.abs(v.s - n.h / n.imgH) < 1e-12, `${v.s} mm/px against the panel'
 assert.ok(Math.abs(v.c.h * v.s - n.h) < 1e-9, `the crop drew ${v.c.h * v.s} mm where the panel is ${n.h}`);
 
 // And it does not move either: the picture pixel `renderGel` draws at the
-// panel's corner is drawn at that same corner here.  Crop pixel (40, 0) of the
-// first lane is scan pixel (534 + 40, 85).
-assert.ok(Math.abs(v.X(534 + 40) - n.x) < 1e-9, `the blot jumped to ${v.X(574)}, panel at ${n.x}`);
+// panel's corner is drawn at that same corner here.  Which pixel that is comes
+// from the layout rather than a number written here -- a cropped panel is drawn
+// to its crop, so it is the crop's own left edge; a panel cut to its lanes
+// would make it the first lane's.
+const corner = gelLayout(n).segs[0].x0;
+assert.strictEqual(corner, 0, 'a cropped panel is drawn to its crop');
+assert.ok(Math.abs(v.X(534 + corner) - n.x) < 1e-9,
+          `the blot jumped to ${v.X(534 + corner)}, panel at ${n.x}`);
 assert.ok(Math.abs(v.Y(85) - n.y) < 1e-9, `the blot jumped to ${v.Y(85)}, panel at ${n.y}`);
 
 // The whole scan is drawn around it: 1024 rows at 4.7 mm per 60 is a
@@ -183,3 +188,35 @@ PF.doc.page.laneMm = 0;
 const hand = { ...pinned, h: 40 };
 gelLayout(hand);
 assert.strictEqual(hand.h, 40, 'unpinned, the page leaves the height alone');
+
+/* ---- the crop is the frame ----
+ *
+ * A panel is cut to its block of lanes, because what lies beyond the outermost
+ * lane of a whole scan is scanner bed.  A crop is not a whole scan: it is a
+ * rectangle somebody dragged, and trimming that again to the lanes means the
+ * rectangle drawn in the crop view is not the one that comes back -- the margin
+ * it loses is the margin that was deliberately left.
+ */
+// Lanes 60 px in from the left and 60 from the right of a 448-px crop.
+const framed = { id: 'f', type: 'gel', x: 0, y: 0, h: 30, imgW: 448, imgH: 60,
+                 crop: { x: 534, y: 85, w: 448, h: 60 }, splice: {},
+                 lanes: [{ id: 'a', x0: 60, x1: 240 }, { id: 'b', x0: 240, x1: 388 }] };
+const FL = gelLayout(framed);
+assert.deepStrictEqual([FL.segs[0].x0, FL.segs[0].x1], [0, 448],
+                       'the rectangle dragged in the crop view is the one that comes back');
+assert.ok(Math.abs(FL.totalW / framed.h - 448 / 60) < 1e-9,
+          `the crop is 448x60 and the panel is ${FL.totalW}x${framed.h}`);
+
+// Without one, the lanes are still what the panel is cut to.
+const bare = gelLayout({ ...framed, crop: null });
+assert.deepStrictEqual([bare.segs[0].x0, bare.segs[0].x1], [60, 388],
+                       'an uncropped scan is cut to its block of lanes');
+
+// And a lane taken out is a lane taken out, crop or no crop: the runs are the
+// frame then, since the whole of a spliced picture is exactly what is not shown.
+const cut = gelLayout({ ...framed,
+  lanes: [{ id: 'a', x0: 60, x1: 180 }, { id: 'x', x0: 180, x1: 240, excised: true },
+          { id: 'b', x0: 240, x1: 388 }] });
+assert.deepStrictEqual(cut.segs.map(s => [s.x0, s.x1]), [[60, 180], [240, 388]],
+                       'a splice keeps its runs');
+console.log('ok — a crop is the frame; an uncropped scan is cut to its lanes');

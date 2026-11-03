@@ -102,4 +102,16 @@ assert.strictEqual(chromScales(tiny).ymax, chromScales({ ...bare, h: 6 }).ymax,
 
 console.log('ok — peaks found on a noisy trace, before the injection ignored,');
 console.log('     the conductivity left alone, a flat top read in its middle,');
-console.log('     and the axis raised until the labels fit inside the plot');
+console.log('     the axis raised until the labels fit inside the plot, and');
+console.log('     every curve normalised against a maximum it works out itself');
+
+// Normalising to the maximum works out that maximum itself.  It used to be
+// stashed on the trace at import time, so a curve that arrived any other way
+// -- a saved session, a pasted CSV -- was left in its raw units.
+const nn = chromNode(0, 0);
+nn.normalise = 'max';
+const raw = { id: 'r', name: 'r', on: true, axis: 'left', pts: [[1, 10], [2, 40], [3, 20]] };
+assert.strictEqual(normY(raw, 40, nn), 100, 'the tallest point becomes 100 with no _max given');
+assert.strictEqual(normY(raw, 10, nn), 25, 'and the rest are its percentage');
+const flat = { id: 'f', name: 'f', on: true, axis: 'left', pts: [[1, -2], [2, 0]] };
+assert.strictEqual(normY(flat, -2, nn), -2, 'a curve that never rises is left alone, not flipped');

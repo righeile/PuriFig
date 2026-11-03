@@ -43,6 +43,7 @@ from numpy.lib.stride_tricks import sliding_window_view
 from scipy import ndimage as ndi
 from flask import Flask, Response, jsonify, request, send_from_directory
 
+from labkit import board as LKBoard
 from labkit import browse as LKB
 from labkit import chemstation
 
@@ -1296,6 +1297,8 @@ def rf_fit(marks, gel_height):
 
 app = Flask(__name__, static_folder=HERE, static_url_path="")
 app.register_blueprint(LKB.flask_blueprint(default_extensions=IMAGE_EXTS + TRACE_EXTS))
+# Send to board with the page open on its own: the figure goes to omnifig from here.
+app.register_blueprint(LKBoard.flask_blueprint("purifig"))
 
 
 @app.after_request
@@ -2162,6 +2165,10 @@ def measure_bands(sig, satmask, boxes, method="border", border=3):
             "sat": sat, "edge": bool(edge),
             "snr": round(float(box.max() - bg) / noise, 2) if noise > 0 else None,
             "onPeak": on_peak,
+            # The row the signal peaks on *inside* the box, which is where the
+            # band is when the box has been stretched by one edge to take in a
+            # smear.  Inside, not the lane's own darkest row: a strong neighbor
+            # would otherwise claim every box in the lane.
         })
     return out
 
@@ -3084,15 +3091,83 @@ def figure_pdf():
 
 @app.route("/api/protocol/open", methods=["POST"])
 def protocol_open():
-    """A Word protocol as the text the canvas edits."""
+    """A protocol as the text the canvas edits: Word, or the text itself."""
     body = request.get_json(force=True, silent=True) or {}
     try:
         path = os.path.abspath(os.path.expanduser(str(body.get("path") or "")))
-        got = proto.read_docx(path)
+        got = proto.read(path)
         return jsonify({"path": path, "name": os.path.basename(path), **got})
     except Exception as exc:
         return _fail(exc, 400 if isinstance(exc, (OSError, ValueError,
                                                   zipfile.BadZipFile)) else 500)
+
+
+#: The library is a folder of protocol files and nothing else: the file is the
+#: entry and its name is the entry's name.  No index, no manifest -- so it
+#: outlives the app, is backed up by copying a folder, and is filled by
+#: dropping the lab's own Word protocols into it.  `--state` moves it, which is
+#: how a test instance cannot write the real one.
+LIB_EXTS = (".docx", ".md", ".txt")
+
+
+def _lib_dir():
+    """Read at call time: `--state` rebinds STATE_DIR after the import."""
+    return os.path.join(STATE_DIR, "protocols")
+
+
+@app.route("/api/protocol/library")
+def protocol_library():
+    """What is in the library folder, by name.
+
+    Word leaves an owner-lock file beside every document it has open --
+    `~$CTD_purification_template.docx` -- which is a .docx and is not a
+    protocol.  The lab's own templates folder has two of them in it.
+    """
+    try:
+        d = _lib_dir()
+        os.makedirs(d, exist_ok=True)
+        out = [{"name": os.path.splitext(f)[0], "file": f,
+                "path": os.path.join(d, f)}
+               for f in os.listdir(d)
+               if not f.startswith((".", "~$")) and f.lower().endswith(LIB_EXTS)
+               and os.path.isfile(os.path.join(d, f))]
+        # By the name shown, not the file name: sorted by the latter, a
+        # `prep-2.md` comes before the `prep.md` it was named after.
+        out.sort(key=lambda e: (e["name"].lower(), e["file"].lower()))
+        return jsonify({"dir": d, "entries": out})
+    except Exception as exc:
+        return _fail(exc)
+
+
+@app.route("/api/protocol/library/add", methods=["POST"])
+def protocol_library_add():
+    """This protocol into the library, under a name of its own.
+
+    A name already there is never written over -- the same name twice gets a
+    -2, like an export -- because a protocol is not cheap to repeat.
+    """
+    body = request.get_json(force=True, silent=True) or {}
+    try:
+        text = str(body.get("text") or "")
+        if not text.strip():
+            raise ValueError("there is no protocol to save")
+        d = _lib_dir()
+        os.makedirs(d, exist_ok=True)
+        # A name, not a path: this route writes a file where the browser says,
+        # so the folder it lands in is checked rather than trusted.
+        name = os.path.basename(re.sub(r"[/\\:]+", " ", str(body.get("name") or ""))).strip()
+        name = re.sub(r"\s+", " ", name).strip(" .") or "protocol"
+        if not name.lower().endswith((".md", ".txt")):
+            name += ".md"
+        path = _free_path(os.path.join(d, name))
+        if os.path.dirname(os.path.abspath(path)) != os.path.abspath(d):
+            raise ValueError("a library entry is a name, not a path")
+        with io.open(path, "w", encoding="utf-8") as fh:
+            fh.write(text if text.endswith("\n") else text + "\n")
+        return jsonify({"dir": d, "path": path, "file": os.path.basename(path),
+                        "name": os.path.splitext(os.path.basename(path))[0]})
+    except Exception as exc:
+        return _fail(exc, 400 if isinstance(exc, (OSError, ValueError)) else 500)
 
 
 @app.route("/api/tecan/open", methods=["POST"])

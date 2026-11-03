@@ -25,6 +25,7 @@ const HANDLE_PX = 7;
 
 let doc, view, sel, mode, pending, editing, drag, marquee;
 let backend = { ok: false };
+let board = null;          // Send to board's handle, once the buttons are wired
 
 function blankDoc(w = 183, h = 240) {
   return {
@@ -39,6 +40,9 @@ function blankDoc(w = 183, h = 240) {
 
 function reset(d) {
   doc = d;
+  // Which figure this is on omnifig's board; saved with it, so the session
+  // opened again redraws what it sent before.
+  doc.boardKey = doc.boardKey || Math.random().toString(36).slice(2, 9);
   if (!doc.sources) doc.sources = [];
   if (!doc.edges) doc.edges = [];
   if (!doc.meta) doc.meta = blankDoc().meta;
@@ -355,7 +359,7 @@ function braceGeom(e) {
 //: last one *after* the markup has been replaced, so it paid for a whole fresh
 //: layout every frame.  The canvas only changes size when the window does;
 //: `render()` and the resize listener drop the reading.
-let canvasRect = null;
+let canvasRect = null, canvasCtm = null;
 
 function canvasSize() {
   if (canvasRect) return canvasRect;
@@ -365,7 +369,12 @@ function canvasSize() {
   if (!(r.width > 1 && r.height > 1)) return { w: r.width, h: r.height };
   return (canvasRect = { w: r.width, h: r.height });
 }
-function pxPerMm() { const m = canvasCTM(); return m ? m.a : canvasSize().w / view.w; }
+// The canvas letterboxes its viewBox (`xMidYMid meet`), so the scale is the
+// smaller of the two ratios -- arithmetic the drawing code can have for nothing,
+// where `getScreenCTM().a` is the same number at the price of a layout flush
+// after every viewBox write.  The transform itself is still read for pointers,
+// where the layout is already clean.
+function pxPerMm() { const c = canvasSize(); return Math.min(c.w / view.w, c.h / view.h) || 1; }
 
 function fitView() {
   const c = canvasSize();
@@ -400,9 +409,16 @@ function matchAspect() {
  *  It was 2.3% out here, which is a crop edge landing a millimeter and a half
  *  from the cursor -- and further out the further it was dragged, so an outline
  *  could not be put where it was wanted however carefully it was aimed. */
+//: Read once per redraw and kept until the next one.  `getScreenCTM` is free
+//: on a settled layout and a millisecond on a figure that has just been written
+//: to, and a redraw asks for it four times -- the page edge, the pasteboard
+//: cards, the selection handles and the zoom label -- so three of the four were
+//: flushing a layout the one before had dirtied.  Nothing can move the canvas
+//: without a redraw or a resize, and both clear this.
 function canvasCTM() {
+  if (canvasCtm) return canvasCtm;
   const m = $('#canvas').getScreenCTM();
-  return m && m.a > 0 && m.d > 0 ? m : null;
+  return m && m.a > 0 && m.d > 0 ? (canvasCtm = m) : null;
 }
 
 function toDoc(ev) {
@@ -585,6 +601,18 @@ function renderOverlay() {
              `fill="#f2f5f8" stroke="#1a1d21" stroke-width="${r3(k)}" style="cursor:ns-resize"/>`;
     }
   });
+  // The line a panel has just landed on, drawn from it to the panel whose edge
+  // it is -- which is the half of the answer "lined up with what?".
+  if (drag && drag.guides && drag.guides.length) {
+    const mb = panelBox(node(drag.lead) || node(drag.orig[0].id) || doc.nodes[0]);
+    drag.guides.forEach(g => {
+      const o = g.ob;
+      if (g.axis === 'x')
+        out += line(g.v, Math.min(o.y, mb.y) - 2, g.v, Math.max(o.y + o.h, mb.y + mb.h) + 2, k, '#e5484d');
+      else
+        out += line(Math.min(o.x, mb.x) - 2, g.v, Math.max(o.x + o.w, mb.x + mb.w) + 2, g.v, k, '#e5484d');
+    });
+  }
   if (marquee) {
     const x = Math.min(marquee.x0, marquee.x1), y = Math.min(marquee.y0, marquee.y1);
     out += rect(x, y, Math.abs(marquee.x1 - marquee.x0), Math.abs(marquee.y1 - marquee.y0),
@@ -621,20 +649,68 @@ function renderCards() {
   }).join('');
 }
 
+const renderPage = () =>
+  `<g id="lb"><rect x="0" y="0" width="${doc.page.w}" height="${doc.page.h}" fill="#ffffff"` +
+  ` stroke="rgba(150,160,175,.7)" stroke-width="${r3(1 / pxPerMm())}"/>${renderCards()}</g>`;
+const renderEdges = () => `<g id="le">${doc.edges.map(renderEdge).join('')}</g>`;
+const nodeGroup = n => `<g data-node="${n.id}">${renderNode(n)}</g>`;
+
 function render() {
-  canvasRect = null;
+  canvasRect = canvasCtm = null;
   const c = $('#canvas');
   c.setAttribute('viewBox', `${r3(view.x)} ${r3(view.y)} ${r3(view.w)} ${r3(view.h)}`);
-  const page = `<g id="lb"><rect x="0" y="0" width="${doc.page.w}" height="${doc.page.h}" fill="#ffffff"` +
-               ` stroke="rgba(150,160,175,.7)" stroke-width="${r3(1 / pxPerMm())}"/>${renderCards()}</g>`;
-  c.innerHTML = renderDefs() + page + renderGrid() +
-    doc.edges.map(renderEdge).join('') +
+  c.innerHTML = renderDefs() + renderPage() + renderGrid() + renderEdges() +
     // One group per panel: it costs nothing here, and it means an exported SVG
     // opens in Illustrator as a figure made of panels rather than as nine
-    // hundred loose paths.
-    doc.nodes.map(n => `<g data-node="${n.id}">${renderNode(n)}</g>`).join('') +
+    // hundred loose paths.  It is also what lets a drag redraw the panel in
+    // the hand and leave the other fifty-five alone.
+    doc.nodes.map(nodeGroup).join('') +
     renderOverlay();
   $('#zoomLabel').textContent = Math.round(pxPerMm() / (96 / 25.4) * 100) + '%';
+  syncEditor();
+  if (board) board.changed();          // a linked board copy follows
+}
+
+/** Put one group of the canvas back, in place of the one that is there. */
+function swap(sel, html) {
+  const el = $('#canvas').querySelector(sel);
+  if (el) el.outerHTML = html;
+}
+
+/** Redraw the panels that changed and the parts of the picture that follow
+ *  them: the clip shapes a gel draws its scan through, the connectors between
+ *  panels, the pasteboard cards and the selection outline.  Every other panel
+ *  is left where it is.
+ *
+ *  A drag used to rebuild the whole canvas on every mouse move -- ten
+ *  milliseconds of a sixteen millisecond frame on a fifty-six panel figure,
+ *  which is a drag that trails the cursor.  Nothing here is new work; it is
+ *  the same work, asked for only where it can have changed anything. */
+function redraw(which) {
+  (Array.isArray(which) ? which : [which]).forEach(n => {
+    if (n) swap(`g[data-node="${n.id}"]`, nodeGroup(n));
+  });
+  swap('defs', renderDefs());
+  swap('#le', renderEdges());
+  swap('#lb', renderPage());
+  swap('#lu', renderOverlay());
+  if (board) board.changed();
+}
+
+/** The view moved and the figure did not.
+ *
+ *  A pan is one attribute.  A zoom is that and the things drawn in screen
+ *  pixels rather than millimeters -- the page edge, the pasteboard cards and
+ *  the selection handles -- which is three strings rather than every panel on
+ *  the page. */
+function renderView(scaled) {
+  canvasCtm = null;                      // the canvas box is where it was
+  $('#canvas').setAttribute('viewBox', `${r3(view.x)} ${r3(view.y)} ${r3(view.w)} ${r3(view.h)}`);
+  if (scaled) {
+    swap('#lb', renderPage());
+    swap('#lu', renderOverlay());
+    $('#zoomLabel').textContent = Math.round(pxPerMm() / (96 / 25.4) * 100) + '%';
+  }
   syncEditor();
 }
 
@@ -909,12 +985,25 @@ $('#stage').addEventListener('mousedown', ev => {
   // meant, and until now the only way to disagree was to click again and be
   // searched again.  Vertical only: which lane a box is in is `b.lane`, and its
   // sides come from the lane, so there is nothing sideways to say.
+  // The top or bottom edge of a measured box: drag one to say how much of the
+  // band is taken in.  The other edge stays, so the box grows the way the hand
+  // does, and the height is the row's, so every lane in the row grows with it.
+  if (target.classList.contains('bandedge')) {
+    const owner = doc.nodes.find(x => x.type === 'gel' &&
+                                      x.quant.bands.some(b => b.id === target.dataset.band));
+    if (!owner) return;
+    const b = owner.quant.bands.find(x => x.id === target.dataset.band);
+    const row = owner.quant.rows.find(r => r.id === b.row);
+    drag = { kind: 'bandh', n: owner, b, row, end: +target.dataset.end,
+             start: p, y0: b.y, h0: (row && row.h) || b.h };
+    return;
+  }
   if (target.classList.contains('bandhit')) {
     const owner = doc.nodes.find(x => x.type === 'gel' &&
                                       x.quant.bands.some(b => b.id === target.dataset.band));
     if (!owner) return;
     const b = owner.quant.bands.find(x => x.id === target.dataset.band);
-    drag = { kind: 'band', n: owner, b, start: p, y0: b.y };
+    drag = { kind: 'band', n: owner, b, start: p, y0: b.y, band0: b.bandY };
     return;
   }
   if (target.classList.contains('lanehit')) {
@@ -940,7 +1029,8 @@ $('#stage').addEventListener('mousedown', ev => {
   }
   if (ev.shiftKey) sel.has(id) ? sel.delete(id) : sel.add(id);
   else if (!sel.has(id)) { sel.clear(); sel.add(id); }
-  if (n) drag = { kind: 'move', start: p, orig: selNodes().map(x => ({ id: x.id, x: x.x, y: x.y })) };
+  if (n) drag = { kind: 'move', lead: n.id, start: p,
+                  orig: selNodes().map(x => ({ id: x.id, x: x.x, y: x.y })) };
   render(); inspector();
 });
 
@@ -950,29 +1040,35 @@ window.addEventListener('mousemove', ev => {
   // A drag is one step, taken at the first movement that changes anything: a
   // click that only selects should not leave an empty step behind, and forty
   // mousemoves should not leave forty.
-  if (!drag.marked && ['move', 'resize', 'lane', 'lean', 'block', 'brace', 'strip', 'band'].includes(drag.kind)) {
+  if (!drag.marked && ['move', 'resize', 'lane', 'lean', 'block', 'brace', 'strip', 'band', 'bandh'].includes(drag.kind)) {
     drag.marked = true;
     mark();
   }
   if (drag.kind === 'pan') {
     view.x = drag.v0.x - (p[0] - drag.start[0]);
     view.y = drag.v0.y - (p[1] - drag.start[1]);
-    render(); return;
+    renderView(); return;
   }
   if (drag.kind === 'marquee') {
     marquee.x1 = p[0]; marquee.y1 = p[1];
-    render(); return;
+    redraw([]); return;
   }
   if (drag.kind === 'move') {
     const dx = p[0] - drag.start[0], dy = p[1] - drag.start[1];
     drag.orig.forEach(o => { const n = node(o.id); n.x = snapv(o.x + dx); n.y = snapv(o.y + dy); });
+    if (!drag.lines) drag.lines = guideLines(new Set(drag.orig.map(o => o.id)));
+    drag.guides = guideSnap(drag);
     drag.onto = dropTarget(drag, p);
-    render(); return;
+    drag.row = protDropRow(ev, drag);
+    // The sheet is off the canvas, so a pointer over it still reads as some
+    // document coordinate: a row under the hand wins over whatever that is.
+    if (drag.row != null) drag.onto = null;
+    redraw(drag.orig.map(o => node(o.id))); return;
   }
   if (drag.kind === 'lean') {
     const n = drag.n, L = gelLayout(n);
     if (L.s) { n[drag.side] = r2(drag.lean0 + 2 * (p[0] - drag.start[0]) / (L.s * drag.u)); n.leanManual = true; }
-    render(); return;
+    redraw(drag.n); return;
   }
   if (drag.kind === 'block') {
     const n = drag.n, L = gelLayout(n);
@@ -983,7 +1079,7 @@ window.addEventListener('mousemove', ev => {
     const cuts = [];
     for (let i = 0; i <= n.lanes.length; i++) cuts.push(Math.round(a + (b - a) * i / n.lanes.length));
     n.lanes.forEach((l, i) => { l.x0 = cuts[i]; l.x1 = cuts[i + 1]; });
-    render(); return;
+    redraw(drag.n); return;
   }
   if (drag.kind === 'lane') {
     const n = drag.n, L = gelLayout(n);
@@ -992,12 +1088,12 @@ window.addEventListener('mousemove', ev => {
     const lo = l.x0 + 4, hi = nx ? nx.x1 - 4 : n.imgW;
     l.x1 = Math.round(clamp(px, lo, hi));
     if (nx) nx.x0 = l.x1;
-    render(); return;
+    redraw(drag.n); return;
   }
   if (drag.kind === 'brace') {
     const span = drag.span || 1;
     drag.e.drop = r3(clamp(drag.drop0 + (p[1] - drag.start[1]) / span, 0.05, 0.95));
-    render(); return;
+    redraw([]); return;
   }
   if (drag.kind === 'strip') {
     // In crop pixels, at the gel's own scale.  The strip's place on the panel
@@ -1007,16 +1103,33 @@ window.addEventListener('mousemove', ev => {
     const d = (p[1] - drag.start[1]) / (L.s || 1);
     if (drag.end === 0) s.y0 = Math.round(clamp(drag.y0 + d, 0, s.y1 - 4));
     else s.y1 = Math.round(clamp(drag.y1 + d, s.y0 + 4, n.imgH));
-    render(); return;
+    redraw(drag.n); return;
   }
   if (drag.kind === 'band') {
     // In crop pixels, at the gel's own scale, like every other grip on a gel.
-    // The centre is kept on the picture and no further: the box itself may hang
+    // The center is kept on the picture and no further: the box itself may hang
     // off the bottom row, which `measure_bands` clips and reports as `edge`,
     // and a band sitting on the edge of the frame is a fact about the blot.
     const { n, b } = drag, L = gelLayout(n);
     b.y = r2(clamp(drag.y0 + (p[1] - drag.start[1]) / (L.s || 1), 0, n.imgH || 0));
-    render(); return;
+    // The whole box moves, so the band it was found on moves with it: a box
+    // stretched to one side and then carried somewhere else is still stretched
+    // to one side.  Resizing, which moves one edge, leaves the row alone.
+    if (drag.band0 != null) b.bandY = r2(drag.band0 + b.y - drag.y0);
+    redraw(drag.n); return;
+  }
+  if (drag.kind === 'bandh') {
+    // In crop pixels, like every other grip on a gel.  The edge dragged moves
+    // and the other stays, so the center moves half as far as the hand; every
+    // other box in the row grows about its own center, because where a box
+    // sits is its own band's and only the height is shared.
+    const { n, b, row, end } = drag, L = gelLayout(n);
+    const { y, h } = quantResize(drag.y0, drag.h0, (p[1] - drag.start[1]) / (L.s || 1),
+                                 end, n.imgH);
+    b.y = y;
+    if (row) { row.h = h; n.quant.bands.forEach(x => { if (x.row === row.id) x.h = h; }); }
+    else b.h = h;
+    redraw(drag.n); return;
   }
   if (drag.kind === 'crop') {
     const { n, src, c0, edge } = drag;
@@ -1034,7 +1147,7 @@ window.addEventListener('mousemove', ev => {
       if (edge.includes('b')) { h = clamp(c0.h + dy, MIN, src.h - c0.y); }
     }
     n.crop = { x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h) };
-    render(); return;
+    redraw(drag.n); return;
   }
   if (drag.kind === 'resize') {
     const n = drag.n, b = drag.b0;
@@ -1053,7 +1166,7 @@ window.addEventListener('mousemove', ev => {
       if (!right) n.x = snapv(b.x + b.w - w);
       if (!bottom) n.y = snapv(b.y + b.h - h);
     }
-    render(); return;
+    redraw(drag.n); return;
   }
 });
 
@@ -1078,6 +1191,16 @@ window.addEventListener('mouseup', () => {
   // was.  It has to go back — a blot left lying on the graph covers the thing it
   // was just added to, and the gesture meant "this belongs there", not "put it
   // there".  One undo takes back both, the drag having marked a step already.
+  // Dropped on a row of a table in the protocol: that row is this construct's,
+  // and the numbers off its sequence fill themselves in.  Like the blot on a
+  // graph it goes back where it was -- the gesture said whose row it is, not
+  // where the panel belongs.
+  if (drag && drag.kind === 'move' && drag.row != null) {
+    protRowDrop(node(drag.orig[0].id), drag);
+    marquee = null; drag = null;
+    render(); inspector();
+    return;
+  }
   if (drag && drag.kind === 'move' && drag.onto) {
     const q = node(drag.onto), g = node(drag.orig[0].id);
     if (q && g) {
@@ -1098,7 +1221,7 @@ window.addEventListener('mouseup', () => {
   // Where it was put, not where a search would put it: being dragged is the
   // whole point.  `quantRemeasure` measures every box on the blot in place,
   // which is one request and saves saying it twice.
-  if (drag && drag.marked && drag.kind === 'band') quantRemeasure(drag.n);
+  if (drag && drag.marked && ['band', 'bandh'].includes(drag.kind)) quantRemeasure(drag.n);
   // The crop is followed live on the preview, which costs nothing; the panel
   // itself is re-rendered from the original array once, when you let go.
   if (drag && drag.kind === 'crop') refreshGelImage(drag.n).then(() => { render(); inspector(); });
@@ -1113,9 +1236,9 @@ $('#stage').addEventListener('contextmenu', ev => { if (ev.ctrlKey) ev.preventDe
 $('#stage').addEventListener('wheel', ev => {
   ev.preventDefault();
   if (!(ev.ctrlKey || ev.metaKey)) {        // two-finger pan; pinch/ctrl zooms
-    const vw = $('#stage').clientWidth || 1, u = view.w / vw;
+    const vw = canvasSize().w || 1, u = view.w / vw;
     view.x += ev.deltaX * u; view.y += ev.deltaY * u;
-    render();
+    renderView();
     return;
   }
   const p = toDoc(ev);
@@ -1125,7 +1248,7 @@ $('#stage').addEventListener('wheel', ev => {
   view.x = p[0] - (p[0] - view.x) * s;
   view.y = p[1] - (p[1] - view.y) * s;
   view.w = w; view.h = view.h * s;
-  render();
+  renderView(true);
 }, { passive: false });
 
 $('#stage').addEventListener('dblclick', ev => {
@@ -1207,6 +1330,19 @@ window.addEventListener('keydown', ev => {
     doc.nodes = doc.nodes.filter(n => !sel.has(n.id));
     doc.edges = doc.edges.filter(e => !sel.has(e.id) && node(e.from) && node(e.to));
     sel.clear(); render(); inspector(); return;
+  }
+  // The grid step while the grid is on, a tenth of a millimeter when it is off,
+  // ten of either with shift.  A run of them is one undo, not forty.
+  const nudge = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[ev.key];
+  if (nudge) {
+    ev.preventDefault();
+    if (!sel.size) return;
+    const step = ($('#snap').checked ? 0.5 : 0.1) * (ev.shiftKey ? 10 : 1);
+    mark('nudge');
+    const ns = selNodes();
+    ns.forEach(n => { n.x = r2(n.x + nudge[0] * step); n.y = r2(n.y + nudge[1] * step); });
+    redraw(ns); inspector();
+    return;
   }
   const add = { g: 'gel', w: 'blot', c: 'chrom', p: 'table', d: 'nanodrop', q: 'quant',
                 s: 'construct', n: 'box', t: 'text', a: 'panel' }[ev.key];
@@ -1533,6 +1669,50 @@ let alignRef = 'frame';                  // frame | ink
 
 const panelBox = n => (alignRef === 'ink' ? inkBox(n) : frameBox(n));
 
+//: A panel is nearly always being put *beside* another one, and the grid is no
+//: help with that: half a millimeter is as content one step past a neighbor's
+//: edge as on it, and the eye reads the miss from across the room.  So while a
+//: panel is in the hand, the edges and centers of the ones that are not become
+//: places to land -- read the same way the align buttons read them, by the
+//: straight element or by everything drawn, so a guide means what they mean.
+
+/** Where the panels that are not being dragged have their edges and centers. */
+function guideLines(held) {
+  const x = [], y = [];
+  doc.nodes.forEach(n => {
+    if (held.has(n.id)) return;
+    const b = panelBox(n);
+    if (!(b.w >= 0) || !(b.h >= 0)) return;
+    x.push([b.x, b], [b.x + b.w / 2, b], [b.x + b.w, b]);
+    y.push([b.y, b], [b.y + b.h / 2, b], [b.y + b.h, b]);
+  });
+  return { x, y };
+}
+
+/** Pull what is in the hand onto the nearest of those lines, and say which
+ *  ones it landed on so the overlay can draw them.
+ *
+ *  Five screen pixels, not five millimeters: the pull has to feel the same at
+ *  every zoom, and at 400% a millimeter is a long way to be dragged. */
+function guideSnap(d) {
+  const n0 = node(d.lead) || node(d.orig[0].id);
+  if (!n0 || !$('#snap').checked) return [];
+  const b = panelBox(n0), tol = 5 / (pxPerMm() || 4);
+  const out = [];
+  [['x', b.x, b.w], ['y', b.y, b.h]].forEach(([axis, lo, len]) => {
+    let hit = null;
+    for (const [v, ob] of d.lines[axis])
+      for (const mine of [lo, lo + len / 2, lo + len]) {
+        const off = v - mine;
+        if (Math.abs(off) <= tol && (!hit || Math.abs(off) < Math.abs(hit.off))) hit = { off, v, ob };
+      }
+    if (!hit) return;
+    d.orig.forEach(o => { const n = node(o.id); if (n) n[axis] = r2(n[axis] + hit.off); });
+    out.push({ axis, v: hit.v, ob: hit.ob });
+  });
+  return out;
+}
+
 function alignSelection(which) {
   const ns = selNodes();
   const [axis, at, pick] = ALIGN_EDGES[which] || [];
@@ -1565,6 +1745,36 @@ function alignSelection(which) {
                  bottom: 'bottom edges', hcentre: 'centers', vcentre: 'middles' }[which];
   hint(`${said} lined up — ${moved} panel${moved === 1 ? '' : 's'} moved, ` +
        `by ${alignRef === 'ink' ? 'everything drawn' : 'the straight element'}.`);
+}
+
+/** Equal gaps between the selected panels, the outermost two staying where
+ *  they are.
+ *
+ *  Gaps rather than centers: panels are not the same size, and a row of them
+ *  with equal center spacing has unequal white between them, which is the
+ *  thing the eye actually measures.  Read through `alignRef` like everything
+ *  else here, so spacing a row by the straight element leaves the tick numbers
+ *  to overhang and spacing it by everything drawn does not. */
+function spreadSelection(axis) {
+  const ns = selNodes();
+  if (ns.length < 3) { hint('Select three or more panels to space evenly.', true); return unmark(); }
+  const size = axis === 'x' ? 'w' : 'h';
+  const items = ns.map(n => ({ n, b: panelBox(n) })).sort((a, b) => a.b[axis] - b.b[axis]);
+  const last = items[items.length - 1];
+  const span = (last.b[axis] + last.b[size]) - items[0].b[axis];
+  const gap = (span - items.reduce((t, it) => t + it.b[size], 0)) / (items.length - 1);
+  let at = items[0].b[axis], moved = 0;
+  items.forEach(it => {
+    const d = at - it.b[axis];
+    if (Math.abs(d) > 0.005) { it.n[axis] = r2(it.n[axis] + d); moved++; }
+    at += it.b[size] + gap;
+  });
+  render(); inspector();
+  if (!moved) { hint('Already evenly spaced.'); return unmark(); }
+  hint(gap >= 0
+    ? `Even gaps of ${r2(gap)} mm — ${moved} panel${moved === 1 ? '' : 's'} moved.`
+    : `Evenly overlapped by ${r2(-gap)} mm — ${moved} panel${moved === 1 ? '' : 's'} moved. ` +
+      `They do not fit between the two on the ends.`);
 }
 
 /* ================= backend ================= */
@@ -1794,7 +2004,7 @@ function regeom(n, a, b) {
   n.leanR = r2((n.leanR || 0) * Hb / Ha);
   n.ladder.marks.forEach(m => { m.y = r2(m.y + dy); });
   n.bands.forEach(x => { x.y = r2(x.y + dy); });
-  n.quant.bands.forEach(x => { x.y = r2(x.y + dy); });
+  n.quant.bands.forEach(x => { x.y = r2(x.y + dy); if (x.bandY != null) x.bandY = r2(x.bandY + dy); });
   n.strips.forEach(s => {
     s.y0 = r2(clamp(s.y0 + dy, 0, Hb - 4));
     s.y1 = r2(clamp(s.y1 + dy, s.y0 + 4, Hb));
@@ -1832,11 +2042,13 @@ async function refreshGelImage(n) {
   let moved = null;
   if (!n.lanes.length) await autoLanes(n, 10);
   else if (was && was.src === now.src) moved = regeom(n, was, now);
-  // A panel from before positions were tracked: unchanged size means an
-  // unchanged picture, which is the common case — a contrast change — and the
-  // one where stretching the lanes to the full width would undo a block the
-  // user had dragged into place.
-  else if (!was && before[0] === n.imgW && before[1] === n.imgH) moved = 'same';
+  // The same size means the same pixels, so the lanes are already where they
+  // belong: a contrast change, a panel from before positions were tracked, and
+  // a panel re-pointed at another exposure of the same frame — which is a new
+  // source id and so does not come through `regeom`.  Stretching the lanes to
+  // the full width there takes a figure's lane boxes off its bands, blank
+  // membrane and all, and nothing on the page says it happened.
+  else if (before[0] === n.imgW && before[1] === n.imgH) moved = 'same';
   else rescaleLanes(n);                  // a different scan: keep the layout, fit it to the width
   n.geom = now;
   if (moved === 'turned' || moved === 'spun') {
@@ -2183,6 +2395,13 @@ async function quantMeasure(n, bands, find, reach) {
     if (!m || m.error) { b.net = NaN; b.error = m ? m.error : 'not measured'; return; }
     Object.assign(b, { y: m.y, h: m.h, net: m.net, raw: m.raw, bg: m.bg, area: m.area,
                        peak: m.peak, sat: m.sat, edge: m.edge });
+    // The row the band was found at, which a size can be read at instead of the
+    // middle of the box.  Written by a search and by nothing else: measuring in
+    // place returns the middle of the box as `y`, so a box opened out by one
+    // edge would otherwise drag the band's row along with it -- which is the
+    // whole thing the setting exists to avoid.  A box that is only measured,
+    // never searched, has none and reads its middle.
+    if (find || b.bandY == null) b.bandY = m.y;
     delete b.error;
     // Every measure, not only a search: a box that was measured where it was
     // clicked, and then moved onto its band, kept the "?" forever.  A box
@@ -2705,8 +2924,6 @@ function fracLabelStep(n) {
 
 function applyTraces(n, curves, fractionMarks, meta) {
   n.traces = curves.map((c, i) => {
-    let max = -Infinity;
-    for (const p of c.pts) if (p[1] > max) max = p[1];
     return {
       id: uid(), name: c.name, unit: c.unit || '', on: i < 2,
       // Which axis a curve belongs on is a question about its unit, not its
@@ -2716,7 +2933,7 @@ function applyTraces(n, curves, fractionMarks, meta) {
             ? 'right' : 'left',
       color: TRACE_COLOURS[i % TRACE_COLOURS.length],
       dash: /cond/i.test(c.name) ? '1.6 1.2' : '', width: 0,
-      pts: c.pts, _max: max,
+      pts: c.pts,
     };
   });
   // Claim a wavelength only when the file states one.  An AKTAprime records the
@@ -2831,7 +3048,7 @@ function inspector() {
     h += row('label', 'label', STR);
     h += row('font pt', 'labelPt', NUM, 'step="0.5"');
     h += row('width mm', 'strokeMm', NUM, 'step="0.05"');
-    h += row('colour', 'stroke', COL);
+    h += row('color', 'stroke', COL);
     if (e.kind !== 'brace') h += row('arrowhead', 'arrowhead', BOOL);
     else {
       h += `<div class="row tight"><label>crossbar</label>${ctl('drop', NUM, 'step="0.05" min="0.05" max="0.95"')}
@@ -2898,6 +3115,7 @@ function emptyInspector() {
       <b>1</b> arrow &nbsp; <b>2</b> elbow &nbsp; <b>3</b> fractions→lanes brace<br>
       <b>0</b> fit &nbsp; ⌘-scroll zoom &nbsp; alt-drag pan<br>
       <b>⌘Z</b> undo &nbsp; <b>⇧⌘Z</b> redo<br>
+      <b>arrows</b> nudge, <b>⇧arrows</b> by ten &nbsp; dragging lines up with the panels beside it<br>
       shift-drag a lane boundary to angle them<br>
       <b>ctrl-drag</b> moves a panel from anywhere on it<br>
       drag a blot onto a graph to add it as a replicate<br>
@@ -2954,7 +3172,7 @@ function emptyInspector() {
 //: What each button lines up, and what it says it does when you hover it.
 const ALIGN_BUTTONS = [
   ['left', 'left', 'Left edges to the leftmost panel'],
-  ['hcentre', 'centre', 'Centers to the middle of the selection, horizontally'],
+  ['hcentre', 'center', 'Centers to the middle of the selection, horizontally'],
   ['right', 'right', 'Right edges to the rightmost panel'],
   ['top', 'top', 'Top edges to the topmost panel'],
   ['vcentre', 'middle', 'Centers to the middle of the selection, vertically'],
@@ -2973,6 +3191,10 @@ function alignInspector() {
         <option value="ink"${alignRef === 'ink' ? ' selected' : ''}>everything drawn</option>
       </select></div>
     ${rows}
+    <div class="btnrow">
+      <button data-act="spread" data-axis="x" title="Equal gaps across, the two on the ends staying put">even across</button>
+      <button data-act="spread" data-axis="y" title="Equal gaps down, the two on the ends staying put">even down</button>
+    </div>
     <div class="note">The <b>straight element</b> is the axis spines of a trace, the
       border of a gel, the rules of a table — the edge the eye reads, and the one to
       use for a column of panels. <b>Everything drawn</b> takes in the tick numbers,
@@ -3074,9 +3296,14 @@ function gelInspector(n) {
          ` The picture is resampled — the frame keeps the crop’s own size, so the corners
            go and everything on it keeps its place — and the record says by how much.</div>`;
     h += `<div class="row"><label>show</label><label class="chk">${ctl('showAll', BOOL)} the whole picture</label></div>`;
-    h += `<div class="note">A panel is normally cut to its block of lanes, because what lies beyond
-          the outermost lane is scanner bed. Ticked, it is drawn to the picture’s own edges instead
-          — which is what a whole blot for the supplementary sheet has to show.</div>`;
+    h += `<div class="note">` + (n.crop
+          ? `This panel is cropped, so it is already drawn to the crop — the rectangle drawn in the
+             crop view is the frame, margins and all. <b>full frame</b> puts the whole scan back, and
+             an uncropped scan is cut to its block of lanes unless this is ticked.`
+          : `An uncropped scan is cut to its block of lanes, because what lies beyond the outermost
+             lane is scanner bed. Ticked, it is drawn to the picture’s own edges instead — which is
+             what a whole blot for the supplementary sheet has to show. A crop is a frame somebody
+             chose, so a cropped panel is drawn to it either way.`) + `</div>`;
     if (n.cropBox) {
       h += `<div class="row"><label>region used</label><label class="chk">${ctl('showCrop', BOOL)} outline it</label></div>`;
       h += `<div class="note">The part of this blot the figure shows, drawn as it really sits — four
@@ -3130,7 +3357,7 @@ function gelInspector(n) {
         rather than as the well: 5 µL of eluate beside 20 µL of lysate reads four times
         what the band says. Leave it empty and nothing is divided. A lane can say its
         own instead, in the box after its role; <b>a lane left empty when its
-        neighbours say a volume is left off the plot</b>, because it is not on their
+        neighbors say a volume is left off the plot</b>, because it is not on their
         scale. It cancels against a loading control and inside a share, so it changes
         neither of those.</div>`;
   // A lane says its own volume only once the gel says one, so the box is not on
@@ -3279,13 +3506,17 @@ const fmtVol = v => (!isFinite(v) ? '—' : Math.abs(v) >= 1e4 || (Math.abs(v) <
 function quantifyInspector(n) {
   const q = n.quant, src = source(n.src);
   const armed = mode === 'pick' && pending && pending.pick === 'quant' && pending.node === n.id ? pending.extra : null;
+  // Whether this blot can say how far a band ran at all: two rungs with sizes
+  // on them, and no size is invented without them.
+  const sized = gelSizedMarks(n).length >= 2;
   let h = `<details class="fold"${q.rows.length ? ' open' : ''}><summary>quantify bands</summary>`;
   if (!q.rows.length) {
     h += `<div class="note">Add a row for the protein you are measuring, and one for the loading
           control, then click each band. The first click sets the box to the band; every lane
           after it gets a box of the same height, so they are comparable. Shift-click measures
-          the band in every lane at once, and a box can be dragged up or down afterwards if the
-          search landed on the wrong row.</div>`;
+          the band in every lane at once. A box can be dragged up or down afterwards if the
+          search landed on the wrong row, and its top or bottom edge dragged to make the row's
+          boxes taller or shorter — or the height typed in the box beside the row.</div>`;
   }
   q.rows.forEach(r => {
     const col = quantColour(n, r);
@@ -3320,11 +3551,17 @@ function quantifyInspector(n) {
     const rows = q.rows;
     const ctrl = rows.find(r => r.role === 'loading control');
     const targets = rows.filter(r => r !== ctrl);
+    // How far a band ran is a measurement as much as how much of it there is,
+    // and these are the boxes it is measured in, so the apparent size belongs
+    // in this table: off this gel's own ladder, between the two rungs either
+    // side, which is the number the quantification panel plots as `size`.
     h += `<div class="qtable"><table><tr><th></th><th>lane</th>` +
          rows.map(r => `<th style="color:${quantColour(n, r)}">${esc(r.name || r.role)}</th>`).join('') +
          (ctrl ? targets.map(r => `<th title="${esc(r.name || 'target')} ÷ ${esc(ctrl.name || 'control')}">` +
                                   `${targets.length > 1 ? esc(r.name || 'target') + ' ' : ''}÷ ctrl</th>`).join('') : '') +
          (anyWhole ? `<th title="the target band over the whole of its lane">purity</th>` : '') +
+         (sized ? rows.map(r => `<th title="apparent size of ${esc(r.name || r.role)}, read off this gel's ladder at the row ‘size at’ names">` +
+                                `${rows.length > 1 ? esc(r.name || r.role) + ' ' : ''}kDa</th>`).join('') : '') +
          `</tr>`;
     gelQuantLanes(n).forEach(x => {
       if (!rows.some(r => x.by[r.id])) return;
@@ -3339,9 +3576,17 @@ function quantifyInspector(n) {
            }).join('') +
            (ctrl ? targets.map(r => `<td>${x.ratios[r.id] !== undefined ? r3(x.ratios[r.id]) : ''}</td>`).join('') : '') +
            (anyWhole ? `<td>${x.purity === null ? '' : `${x.purity >= 10 ? Math.round(x.purity) : r2(x.purity)}%`}</td>` : '') +
+           (sized ? rows.map(r => {
+             const v = x.by[r.id] ? gelKDaAtY(n, quantSizeY(n, x.by[r.id])) : null;
+             return `<td>${v === null ? '' : kDaStr(v)}</td>`;
+           }).join('') : '') +
            `</tr>`;
     });
     h += `</table></div>`;
+    if (!sized) {
+      h += `<div class="note">Type the ladder's sizes under <b>size standards</b> and each box's
+            apparent size appears here as well, read off the rungs either side of it.</div>`;
+    }
     const sat = q.bands.filter(b => b.sat).length;
     if (sat) {
       h += `<div class="note warn">${sat} box${sat === 1 ? ' has' : 'es have'} saturated pixels in
@@ -3366,12 +3611,17 @@ function quantifyInspector(n) {
           the way a step is named in a purification table and the number goes there.</div>`;
   }
   h += row('background', 'quant.method', 'sel', opts(['border', 'profile'], q.method));
+  if (sized) h += row('size at', 'quant.sizeAt', 'sel', opts(['box center', 'band center'], q.sizeAt));
   h += `<div class="row tight"><label>border px</label>${ctl('quant.border', NUM, 'step="1" min="1" max="20" title="height of the strip above and below each box"')}
         <label>inset</label>${ctl('quant.inset', NUM, 'step="0.05" min="0" max="0.45" title="fraction of the lane left out at each side"')}</div>`;
   h += `<div class="note">Measured on the original ${src ? src.bits + '-bit ' : ''}data: the display
         window and γ shape the figure and never a number. <b>border</b> takes the background from
         a thin strip just above and below each box in its own lane; <b>profile</b> from a rolling
-        minimum down the lane, which copes better with a smear.</div>`;
+        minimum down the lane, which copes better with a smear.` +
+       (sized ? ` <b>size at</b> is the row an apparent size is read at — the middle of the box,
+        or the row the band was found at when the box was placed, which opening the box out to one
+        side does not move. They are the same row until a box is reshaped by hand. It changes no
+        signal, only where the ladder is read.` : '') + `</div>`;
   const qp = doc.nodes.filter(x => x.type === 'quant' && x.gels.includes(n.id));
   h += `<div class="btnrow">${qp.length ? btn('qOpenPanel', 'go to the quantification')
                                         : btn('qNewPanel', 'quantify replicates…', q.bands.length ? 'primary' : '')}</div>`;
@@ -3447,8 +3697,9 @@ function quantInspector(n) {
             lanes are percentages of different things.</div>`;
     }
     if (n.readout === 'size') {
-      h += `<div class="note">Read off each blot’s own ladder, at the row the band was found on,
-            between the two rungs either side. Nothing divides it and nothing is set to 1 — a
+      h += `<div class="note">Read off each blot’s own ladder, at the row the band was found on
+            — the middle of its box, or the row its band was found at, as that blot’s
+            <b>size at</b> says — between the two rungs either side. Nothing divides it and nothing is set to 1 — a
             size is not a ratio — so the blots need their sizes typed before this says anything.
             The axis does not start at zero, because a size is a scale and not an amount.</div>`;
     }
@@ -3478,7 +3729,7 @@ function quantInspector(n) {
             two preparations run side by side, or one preparation loaded twice — the first is a
             replicate and counts towards n, the second is a repeat measurement of the same thing and
             is averaged into one point. Nothing in the picture tells them apart, so this says which.
-            Either way the blot is normalised by their mean.</div>`;
+            Either way the blot is normalized by their mean.</div>`;
     }
     h += `<div class="row tight"><label>error bars</label>${ctl('error', 'sel', opts(['sd', 'sem'], n.error))}
           <label class="chk">${ctl('bars', BOOL)} bars</label>
@@ -3555,11 +3806,12 @@ function quantInspector(n) {
   h += `<details class="fold"><summary>axes</summary>`;
   h += row('y label', 'ylabel', 'area', `placeholder="${esc(quantYLabel({ ...n, ylabel: '' }, D))}"`);
   h += `<div class="row"><label class="chk">${ctl('horizontal', BOOL)} bars across</label></div>`;
-  // Pinned, the bars' axis would be overwritten by the next draw, so it is
-  // shown as what it is: a readout, not a control.
-  const box = k => (pinned && k !== vKey)
-    ? `<span class="derived tight" title="set by the bar width, below">${r2(n[k])} mm</span>`
-    : ctl(k, NUM, 'step="1"');
+  // Pinned, the bars' axis is the bar width times the conditions -- but a
+  // figure is sometimes drawn to a plotting area the journal gives, so it
+  // stays typeable and the arithmetic runs backwards onto the bar.
+  const box = k => ctl(k, NUM, (pinned && k !== vKey)
+    ? `step="1" title="the bars' axis — typing it sets the bar width below"`
+    : 'step="1"');
   h += `<div class="row tight"><label>w</label>${box('w')}<label>h</label>${box('h')}</div>`;
   // The value axis is read against the next panel, so it is the same length in
   // every one of them or the figure carries two scales -- the other half of
@@ -3624,7 +3876,12 @@ function chromInspector(n) {
       <select data-trace="${t.id}" data-tk="axis" style="flex:0 0 46px">${opts(['left', 'right'], t.axis)}</select>
     </div>`;
   });
+  h += row('key', 'legend', 'sel', opts(LEGEND_PLACES, n.legend || 'none'));
   h += row('normalize', 'normalise', 'sel', opts(['none', 'max'], n.normalise));
+  if (n.normalise === 'max') h += `<div class="note">Every curve is drawn against its own
+    maximum, so the axis runs 0&ndash;100 while the y label still says whatever it said:
+    change it, or the panel claims units it is no longer in.${n.auto ? '' :
+    ' The y window below is still the one typed in the old units \u2014 tick auto range, or retype it.'}</div>`;
   h += row('line mm', 'traceMm', NUM, 'step="0.05"');
   h += `</details>`;
 
@@ -3801,6 +4058,36 @@ function chromInspector(n) {
 
 /* ---- table & box ---- */
 
+/** The protein as a list of chains, so that another can be added to it.
+ *
+ *  A protein that was one chain becomes chain 1, and whatever was typed over
+ *  its sequence goes down with it: at the top of a complex those same fields
+ *  mean the *complex's* mass and ε, so a monomer's ε left there would stand
+ *  for all six subunits. */
+function protToChains(p) {
+  if (!p.chains) {
+    const c = { name: p.name || '', seq: p.seq || '', n: 1 };
+    ['mw', 'eps', 'a01'].forEach(key => {
+      if (nn(p[key]) !== null) { c[key] = p[key]; p[key] = null; }
+    });
+    p.chains = (c.seq || c.mw || c.eps || c.a01) ? [c] : [];
+    p.seq = '';
+  }
+  return p.chains;
+}
+
+/** The chains as the FASTA they were pasted as, so that editing them is
+ *  editing the text they came from. */
+const protChainsFasta = p => (p.chains || []).filter(c => c.seq)
+  .map(c => `>${c.name || 'chain'}${(c.n || 1) > 1 ? ` ×${c.n}` : ''}\n${c.seq}`).join('\n');
+
+const protComplexSaid = p => {
+  const k = proteinConstants(p);
+  return `${protStoich(k)} — ${k.mw ? `${r2(k.mw / 1000)} kDa` : 'mass not known'}` +
+         (k.eps !== null ? `, ε₂₈₀ ${Math.round(k.eps)} M⁻¹cm⁻¹, A 0.1% ${r3(k.a01)}`
+                         : ', and no ε until every chain has one');
+};
+
 function nanodropInspector(n) {
   const k = proteinConstants(n.protein);
   const pp = k.pp;
@@ -3809,9 +4096,57 @@ function nanodropInspector(n) {
 
   h += `<details class="fold" open><summary>protein</summary>`;
   h += row('name', 'protein.name', STR, 'placeholder="ExampleR"');
-  h += `<div class="btnrow">${btn('pasteSeq', pp ? 'change sequence…' : 'paste sequence…', 'primary')}
-        ${btn('clearSeq', 'clear')}</div>`;
-  if (pp) {
+  const chains = n.protein.chains;
+  h += `<div class="btnrow">${btn('pasteSeq', (pp || chains) ? 'change sequence…' : 'paste sequence…', 'primary')}
+        ${btn('chAdd', '+ chain')}${btn('clearSeq', 'clear')}</div>`;
+  // A complex is usually expressed from several plasmids, and each of those is
+  // already on the canvas as a construct panel -- with its protease site
+  // ticked, so what is offered is the chain that is in the tube rather than
+  // the one that came off the ribosome.
+  const cons = doc.nodes.filter(x => x.type === 'construct' && constructChain(x));
+  if (cons.length) {
+    h += `<div class="row"><label title="Its largest piece after the protease, with the residues when the panel has them">+ a chain from</label>
+      <select data-act="chFrom"><option value="">a construct panel…</option>` +
+      cons.map(x => `<option value="${x.id}">${esc(x.title || 'untitled construct')}</option>`).join('') +
+      `</select></div>`;
+  }
+  if (chains) {
+    chains.forEach((c, i) => {
+      const ck = proteinConstants({ cys: n.protein.cys, ...c, chains: null });
+      h += `<div class="lane"><span class="n">${i + 1}</span>
+        <input class="lbl" data-ch="${i}" data-chk="name" value="${esc(c.name || '')}" placeholder="chain">
+        <span class="dim">×</span>
+        <input class="lbl num" data-ch="${i}" data-chk="n" value="${c.n ?? 1}"
+          title="copies of this chain in the complex" style="flex:0 0 34px">
+        <span class="derived" title="${ck.eps !== null
+          ? `ε₂₈₀ ${Math.round(ck.eps)} M⁻¹cm⁻¹ each${ck.pp ? `, ${ck.pp.n} residues` : ''}`
+          : 'no ε of its own — paste its sequence, or type one'}">${ck.mw ? `${r2(ck.mw / 1000)} kDa` : '—'}</span>
+        <button data-act="chSeq" data-ch="${i}" title="paste this chain's sequence">seq</button>
+        <button data-act="chDel" data-ch="${i}" title="take this chain out of the complex">✕</button></div>`;
+      if (ck.pp && ck.pp.nucleotide) {
+        h += `<div class="note warn">Chain ${i + 1} reads as a nucleotide sequence, not a
+              protein — its mass and its ε are both meaningless. Translate it first.</div>`;
+      }
+    });
+    h += `<div class="kv">
+      <span>chains</span><b>${chains.length} kind${chains.length === 1 ? '' : 's'}, ${k.copies} in all${k.aa ? ` · ${k.aa} residues` : ''}</b>
+      <span>mass</span><b>${k.mw ? `${r2(k.mw)} Da &nbsp;(${r2(k.mw / 1000)} kDa)` : 'not known'}</b>
+      <span>ε₂₈₀</span><b>${k.eps !== null ? `${Math.round(k.eps)} M⁻¹cm⁻¹` : 'not known'}</b>
+      <span>A 0.1%</span><b>${k.a01 !== null ? r3(k.a01) : '—'}</b>
+    </div>`;
+    if (k.eps === null) {
+      h += `<div class="note warn">A chain here has no ε of its own, so the complex has
+            none: paste its sequence, or type its ε beside it. Two thirds of an extinction
+            coefficient belongs to a protein that is not in the tube.</div>`;
+    }
+    h += row('cysteines', 'protein.cys', 'sel', opts(['reduced', 'cystine'], n.protein.cys));
+    h += `<div class="note">ε and mass are sums over the copies — ε = Σ n·ε, M = Σ n·M — so
+          A 0.1%, which is ε/M, is their mass-weighted average: a complex of one repeated
+          subunit has its monomer's A 0.1% exactly and only the µM changes. Not in this:
+          a disulfide <i>between</i> two chains (+125 M⁻¹cm⁻¹ each) and anything absorbing
+          at 280 nm that is not protein — a bound nucleotide, a heme, a detergent with a
+          ring in it. Type ε over it when one of those matters.</div>`;
+  } else if (pp) {
     if (pp.nucleotide) {
       h += `<div class="note warn">This reads as a nucleotide sequence, not a protein —
             A, C, G and T are all amino acids, so it will happily give you a mass for
@@ -3905,7 +4240,7 @@ function tableInspector(n) {
   h += row('title', 'title', STR);
   h += `<div class="btnrow">${btn('addRow', '+ row')}${btn('delRow', '− row')}${btn('addCol', '+ column')}</div>`;
   h += row('from the figure', 'derive', BOOL);
-  h += `<div class="note">Click a cell in the list to edit it. A greyed cell is taken
+  h += `<div class="note">Click a cell in the list to edit it. A grayed cell is taken
         from the figure rather than typed — hover it for where from. What you typed is
         kept underneath and comes back if you turn this off.</div>`;
   const der = tableRows(n);
@@ -4127,6 +4462,22 @@ function bindInspector() {
       }).catch(err => hint(err.message, true));
       return;
     }
+    if (el.dataset.act === 'chFrom') {
+      const cn = doc.nodes.find(x => x.id === el.value);
+      const c = cn && constructChain(cn);
+      if (!c) return;
+      protToChains(n.protein).push(c);
+      render(); inspector();
+      hint(protComplexSaid(n.protein) + (c.seq ? '' :
+           ` — ${c.name || 'that panel'} is drawn in lengths rather than residues, so ` +
+           `there is nothing to count tryptophans in.`));
+      return;
+    }
+    if (el.dataset.ch !== undefined && el.dataset.chk) {
+      const c = (n.protein.chains || [])[+el.dataset.ch];
+      if (c) c[el.dataset.chk] = el.dataset.chk === 'n' ? (numOr(el.value) || 1) : el.value;
+      render(); return;
+    }
     if (el.dataset.act === 'qnCtrlGel') {
       if (!n.controls) n.controls = [];
       n.controls[+el.dataset.i] = el.value || '';
@@ -4176,6 +4527,14 @@ function bindInspector() {
       // drag handle puts it back.
       if (n && n.type === 'gel' && key === 'drawnH') {
         if (v) { gelSetDrawnH(n, v); render(); }
+        return;
+      }
+      // The bars' axis is derived from the bar width, so typing it has to run
+      // that arithmetic backwards -- set directly, the next draw puts it back.
+      if (n && n.type === 'quant' && key === (n.horizontal ? 'h' : 'w')
+          && quantBarMm(n) > 0 && v > 0) {
+        quantSetAxis(n, v, quantData(n).conditions.length);
+        render();
         return;
       }
       setPath(obj, key, v);
@@ -4302,7 +4661,9 @@ function bindInspector() {
  *  box again — once, with the value as it was left.  And redrawing the panel
  *  around an A₂₈₀ reading, whose warnings depend on the whole of it. */
 function committed(el, n) {
-  if (n && n.type === 'nanodrop' && el.dataset.nd) { inspector(); return; }
+  if (n && n.type === 'nanodrop' && (el.dataset.nd || el.dataset.ch !== undefined)) {
+    inspector(); return;
+  }
   if (!n || n.type !== 'gel') return;
   if (el.dataset.qrow && el.dataset.qk === 'h') {
     const r = n.quant.rows.find(x => x.id === el.dataset.qrow);
@@ -4346,6 +4707,7 @@ async function inspectorAction(act, el) {
       case 'delEdge': doc.edges = doc.edges.filter(e => !sel.has(e.id)); sel.clear(); break;
       case 'braceMid': selEdges().forEach(x => { x.drop = 0.5; }); break;
       case 'align': alignSelection(el.dataset.edge); return;
+      case 'spread': spreadSelection(el.dataset.axis); return;
 
       case 'pickImage': await pickImage(n); return;
       case 'relink': await relinkSource(n); return;
@@ -4677,16 +5039,59 @@ async function inspectorAction(act, el) {
              : `x is back on the method's own axis; the injection was at ${r2(n.inject.raw)} mL.`);
         break;
       case 'pasteSeq': {
-        const t = prompt('Paste the protein sequence — FASTA, plain, numbered, any case:',
-                         n.protein.seq || '');
+        const t = prompt('Paste the protein sequence — FASTA, plain, numbered, any case.\n' +
+                         'Several FASTA records are several chains of a complex, and the ' +
+                         'copies go on the header: ">LRRC8A ×4".',
+                         n.protein.chains ? protChainsFasta(n.protein) : (n.protein.seq || ''));
         if (t === null) return unmark();
-        n.protein.seq = t.trim();
-        const pp = protParam(n.protein.seq);
-        hint(pp ? `${pp.n} residues, ${r2(pp.mw / 1000)} kDa, A 0.1% ${r3(pp.a01Red)}`
-                : 'No residues found in that.', !pp);
+        const fresh = parseChains(t);
+        // A chain with no sequence of its own was never in this text, so it
+        // stays: a paste must not quietly leave a subunit out of the complex.
+        const cs = fresh.concat((n.protein.chains || []).filter(c => !c.seq));
+        if (cs.length > 1) {
+          n.protein.chains = cs; n.protein.seq = '';
+          hint(protComplexSaid(n.protein));
+        } else if (fresh.length === 1) {
+          n.protein.chains = null;
+          n.protein.seq = fresh[0].seq;
+          const pp = protParam(n.protein.seq);
+          hint(`${pp.n} residues, ${r2(pp.mw / 1000)} kDa, A 0.1% ${r3(pp.a01Red)}`);
+        } else {
+          hint('No residues found in that.', true);
+          return unmark();
+        }
         break;
       }
-      case 'clearSeq': n.protein.seq = ''; break;
+      case 'chAdd': {
+        const t = prompt('Paste the chain — FASTA, plain, any case. ' +
+                         'Its copies go on the header, as ">LRRC8C ×2":', '');
+        if (t === null) return unmark();
+        const cs = parseChains(t);
+        if (!cs.length) { hint('No residues found in that.', true); return unmark(); }
+        protToChains(n.protein).push(...cs);
+        hint(protComplexSaid(n.protein));
+        break;
+      }
+      case 'chSeq': {
+        const c = (n.protein.chains || [])[+el.dataset.ch];
+        if (!c) return unmark();
+        const t = prompt(`Paste the sequence of ${c.name || 'this chain'}:`, c.seq || '');
+        if (t === null) return unmark();
+        const got = parseChains(t);
+        c.seq = got.length ? got[0].seq : '';
+        // Residues counted beat residues estimated, so the mass that stood in
+        // for the sequence goes when the sequence arrives.
+        if (c.seq && nn(c.mw) !== null) c.mw = null;
+        hint(c.seq ? protComplexSaid(n.protein) : 'That chain has no sequence now.');
+        break;
+      }
+      case 'chDel': {
+        const cs = n.protein.chains || [];
+        cs.splice(+el.dataset.ch, 1);
+        if (!cs.length) n.protein.chains = null;
+        break;
+      }
+      case 'clearSeq': n.protein.seq = ''; n.protein.chains = null; break;
       case 'ndAdd':
         n.readings.push({ id: uid(), sample: '', a280: null, a260: null,
                           dil: null, vol: null, instrument: null, note: '' });
@@ -5736,6 +6141,14 @@ function integrityReport() {
     push(`## Concentration table ${i + 1}`);
     if (n.title) push(`title              ${n.title}`);
     push(`protein            ${n.protein.name || '(unnamed)'}`);
+    if (k.parts) {
+      push(`complex            ${protStoich(k)} — ε and mass summed over the copies`);
+      k.parts.forEach(x => push(
+        `  ${(x.name || '(unnamed chain)').padEnd(22)} ×${x.copies}` +
+        `  ${x.k.mw ? r2(x.k.mw) + ' Da' : 'mass not known'}` +
+        `${x.k.eps !== null ? `, ε₂₈₀ ${Math.round(x.k.eps)}` : ', ε not known'}` +
+        `${x.pp ? `, ${x.pp.n} residues` : ''}`));
+    }
     if (k.pp) {
       push(`sequence           ${k.pp.n} residues, ${r2(k.pp.mw)} Da, pI ${r2(k.pp.pI)}`);
       push(`ε₂₈₀               ${k.pp.epsRed} M⁻¹cm⁻¹ reduced, ${k.pp.epsCys} with cystines` +
@@ -5756,11 +6169,12 @@ function integrityReport() {
       warn.push(`concentration table ${i + 1}: no extinction coefficient — the A₂₈₀ readings ` +
                 `are absorbances, and nothing here turns them into a concentration.`);
     }
-    if (k.pp && k.pp.nucleotide) {
-      warn.push(`concentration table ${i + 1}: the sequence reads as nucleotide, not protein — ` +
-                `every mass and coefficient derived from it is meaningless.`);
+    const pps = k.pp ? [k.pp] : (k.parts || []).map(x => x.pp).filter(Boolean);
+    if (pps.some(x => x.nucleotide)) {
+      warn.push(`concentration table ${i + 1}: a sequence here reads as nucleotide, not ` +
+                `protein — every mass and coefficient derived from it is meaningless.`);
     }
-    if (k.pp && k.pp.epsRed === 0) {
+    if (pps.length && pps.every(x => x.epsRed === 0)) {
       warn.push(`concentration table ${i + 1}: no Trp or Tyr, so this protein barely absorbs at ` +
                 `280 nm — A₂₈₀ is the wrong way to measure it.`);
     }
@@ -5812,6 +6226,8 @@ function integrityReport() {
       push(`measures           the apparent size of ${D.target || '(no target row)'}, in kDa`);
       push(`read from          each blot's own ladder, straight in log(size) between the two ` +
            `rungs either side of the band; not normalized`);
+      push(`at the row         ${D.gels.some(g => g.quant.sizeAt === 'band center')
+            ? 'each band was found on' : 'in the middle of each box'}`);
     } else if (D.readout === 'share') {
       push(`measures           ${D.target || '(no target row)'} as a percentage of the protein`);
       push(`read from          every target row on the blot, summed in the same lane; no loading ` +
@@ -5982,6 +6398,8 @@ function methodsDraft() {
     if (D.readout === 'size') {
       s += `The apparent size of ${D.target || 'the band'}, read off each blot's own marker by` +
            ` straight-line interpolation in log(size) between the two rungs either side of the band.`;
+      if (D.gels.some(g => g.quant.sizeAt === 'band center'))
+        s += ` The row read is where each band was found, not the middle of a box that was reshaped by hand.`;
     } else if (D.readout === 'share') {
       const tr = [...new Set(D.gels.flatMap(g =>
         (g.quant.rows || []).filter(r => r.role === 'target').map(r => r.name)))];
@@ -6064,7 +6482,7 @@ function captionDraft() {
       if (shaded.length) {
         s += ` Shading marks the fractions run on the gel below (${shaded.map(x => x.label).join(', ')}).`;
       }
-      if (n.fractions.pooled) s += ` The shaded region was pooled${doc.nodes.some(x => x.type === 'gel') ? ' and analysed in the panel below' : ''}.`;
+      if (n.fractions.pooled) s += ` The shaded region was pooled${doc.nodes.some(x => x.type === 'gel') ? ' and analyzed in the panel below' : ''}.`;
       n.peaks.filter(p => p.label).forEach(p => {
         const mw = chromMwLabel(n, p.v);
         s += ` The peak at ${r2(p.v)} mL${mw ? ` (${mw})` : ''} is labeled ${p.label}.`;
@@ -6096,6 +6514,9 @@ function captionDraft() {
         if (k.from === 'sequence') s += ` (ε₂₈₀ ${Math.round(k.eps)} M⁻¹cm⁻¹ and ${r2(k.mw)} Da from the sequence,` +
           ` ${n.protein.cys === 'cystine' ? 'cystines formed' : 'cysteines reduced'})`;
         else s += ` as entered`;
+        // A complex's coefficient is a sum over an assumed stoichiometry, and
+        // that assumption is the part a reader has to be able to disagree with.
+        if (k.parts) s += `, summed over ${protStoich(k)}`;
       }
       s += '.';
       out.push(s);
@@ -6319,6 +6740,9 @@ function protocolDoc() {
   //: edit being undone.
   if (P.scale == null) P.scale = 1;
   if (!P.base) P.base = protBaseMass(P.text);
+  //: And what one column volume of resin is, for the protocols that count in
+  //: them rather than in millilitres -- see protBed.
+  if (P.bed == null) P.bed = protBed(P.text);
   //: A session saved while the scale was a bare number opens at the same scale.
   if (!Array.isArray(P.pellets)) P.pellets = [{ id: uid(), c: '', g: r2(P.base * (P.scale || 1)) }];
   if (!P.samples) P.samples = {};
@@ -6356,7 +6780,7 @@ function panelWhat(n) {
  */
 
 const PROT_PREFIX = { title: '# ', heading: '## ', comment: '> ', step: '- ',
-                      line: '  ', blank: '' };
+                      line: '  ', row: '', blank: '' };
 
 /** The editable text as items — the same kinds, in the same order, as `parse()`
  *  in protocol.py, which is what both writers read.  The two have to agree:
@@ -6372,12 +6796,132 @@ function protParse(text) {
     if (/^[-*•]$/.test(s)) return { kind: 'step', text: '' };
     if (s.startsWith('> ')) return { kind: 'comment', text: s.slice(2).trim() };
     if (/^[-*•][ \t]/.test(s)) return { kind: 'step', text: s.slice(1).trim() };
+    if (/^\|.*\|$/.test(s)) return { kind: 'row', text: s };
     return { kind: /^[ \t]/.test(raw) ? 'line' : 'step', text: s };
   });
 }
 
 const protSerialize = items =>
   items.map(it => (it.kind === 'blank' ? '' : PROT_PREFIX[it.kind] + it.text)).join('\n');
+
+//: A table in the protocol is one `| a | b | c |` line per row, the outer pipes
+//: always written so that a cell with nothing in it is still a cell.  One line
+//: per row keeps a table inside the same text model as everything else: an item
+//: with a `text`, edited, undone, exported and read back with no second store
+//: beside it.  `protocol.py` splits the same line the same way.
+const protRowCells = t => String(t).slice(1, -1).split('|').map(c => c.trim());
+const protRowText = cs => '|' + cs.map(c => ` ${c} `).join('|') + '|';
+
+/** Runs of row items, as `{ index of the first: [[cell, ...], ...] }`.  A blank
+ *  line between two rows makes two tables, as it does to everything else. */
+function protTables(items) {
+  const out = {};
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].kind !== 'row') continue;
+    let j = i;
+    while (j < items.length && items[j].kind === 'row') j++;
+    out[i] = items.slice(i, j).map(x => protRowCells(x.text));
+    i = j - 1;
+  }
+  return out;
+}
+
+//: Which column is which, read off the header row's own words -- the Overview
+//: the binder protocol carries names them `ID`, `ε 0.1%`, `MW (kDa)`, `Conc
+//: (mg/ml)`, `Vol (µl)`, `Gly (µl)`, `Final (mg/ml)`.  A table that names none
+//: of them is still a table; nothing in it is computed, which is the right
+//: answer for a table whose columns this cannot read.
+const PROT_COLS = [
+  ['id', /^(id|binder|construct|name|protein|sample)\b/i],
+  ['eps', /ε|\beps|a\s*0?\.1\s*%|absorb/i],
+  ['mw', /\bmw\b|\bmass\b|kda/i],
+  ['conc', /^conc/i],
+  ['vol', /^vol/i],
+  ['gly', /^gly|glycer/i],
+  ['final', /^final/i],
+];
+const protRowCols = head => head.map(h =>
+  (PROT_COLS.find(([, re]) => re.test(h)) || ['', null])[0]);
+
+/** The construct panel a row names, and what its sequence says.
+ *
+ *  The protein in the tube is what came off the column after the protease, so a
+ *  construct that is cleaved reports its largest piece rather than the chain it
+ *  was expressed as.  The mass comes out of the residues either way; ε 0.1%
+ *  only when every segment arrived with its sequence, because an estimated
+ *  chain has no tryptophans to count. */
+function protConstructOf(name) {
+  // A complex is written where the name goes: `LRRC8A ×4 + LRRC8C ×2`, one row
+  // and several plasmids.  One name is the same thing with one chain in it, so
+  // there is one path through here and not two.
+  const terms = String(name || '').split('+').map(t => t.trim()).filter(Boolean);
+  if (!terms.length) return null;
+  const chains = [], nodes = [];
+  for (const t of terms) {
+    let title = t, copies = 1, m;
+    if ((m = t.match(/^\s*(\d+)\s*[x×*]\s*(.+)$/i))) { copies = +m[1]; title = m[2]; }
+    else if ((m = t.match(/^(.*?)\s*(?:[x×*]\s*(\d+)|\((\d+)\))\s*$/i))) {
+      title = m[1]; copies = +(m[2] || m[3]);
+    }
+    const key = title.trim().toLowerCase();
+    const cn = key && doc.nodes.find(x => x.type === 'construct' &&
+      String(x.title || '').trim().toLowerCase() === key);
+    const c = cn && constructChain(cn);
+    if (!c) return null;                 // one name nobody recognizes is no answer
+    chains.push({ ...c, n: copies });
+    nodes.push(cn);
+  }
+  const k = proteinConstants({ chains });
+  return { mw: k.mw, a01: k.a01, node: nodes[0], nodes, chains, stoich: protStoich(k) };
+}
+
+/** The cells a row works out for itself, written into the row rather than drawn
+ *  over it: an Overview is the record of what was done, and a column computed
+ *  only on screen leaves the exported document empty.
+ *
+ *  Glycerol is a quarter of the sample -- the protocol's own "100% glycerol
+ *  equal to ¼ of the sample volume ... to a total of ≈24%" -- and the final
+ *  concentration is what that dilution leaves, the ×0.8 the lab book writes as
+ *  an arrow.  Nothing is recomputed until a cell is touched: a number the
+ *  protocol came with is what the protocol says. */
+function protRowDerive(cells, cols) {
+  const at = k => cols.indexOf(k);
+  const num = i => {
+    if (i < 0) return NaN;
+    const v = String(cells[i] ?? '').replace(/,/g, '').trim();
+    return v && isFinite(+v) ? +v : NaN;
+  };
+  const set = (i, v) => { if (i >= 0) cells[i] = v; };
+  const has = i => i >= 0 && !!String(cells[i] ?? '').trim();
+  const vi = at('vol'), gi = at('gly'), ci = at('conc'), fi = at('final');
+  const v = num(vi);
+  // Computed when there is something to compute from, and emptied only when the
+  // cell it comes from is itself empty.  A completed prep read back out of Word
+  // writes its concentration as `70.6/2->28.3`, which is not a number and not a
+  // mistake either: blanking the glycerol beside it would throw away the record.
+  if (gi >= 0 && vi >= 0) { if (v > 0) set(gi, String(r2(v / 4))); else if (!has(vi)) set(gi, ''); }
+  const g = num(gi), c = num(ci);
+  if (fi >= 0 && ci >= 0) {
+    if (c > 0 && v > 0) set(fi, String(r2(c * v / (v + (g > 0 ? g : 0)))));
+    else if (!has(ci) || !has(vi)) set(fi, '');
+  }
+  // The sequence fills a mass or an absorbance in; it does not keep them. A
+  // number in one of those cells is the one that was used, and purifig's rule
+  // everywhere else -- `proteinConstants` -- is that a typed value wins over a
+  // computed one.  `protRowDrop` empties them first, so dropping another
+  // construct on the row does answer with its numbers.
+  const q = protConstructOf(cells[at('id')]);
+  if (q) {
+    if (!has(at('mw'))) set(at('mw'), String(r2(q.mw / 1000)));
+    if (q.a01 && !has(at('eps'))) set(at('eps'), String(r3(q.a01)));
+  }
+  return cells;
+}
+
+/** Which columns a row does not take typing in: the two it computes, and only
+ *  those -- so a cell edit never changes the shape of the row it is in, and the
+ *  form is never rebuilt under the hand filling it in. */
+const protRowCalc = cols => cols.map(k => k === 'gly' || k === 'final');
 
 /** Two blank lines in a row, or a blank at either end, are what removing a line
  *  leaves behind rather than anything the protocol said. */
@@ -6415,7 +6959,7 @@ function protShape(items) {
     }
     start = -1;
     if (it.kind === 'step') step = i;
-    else if (it.kind === 'title' || it.kind === 'heading') step = -1;
+    else if (it.kind === 'title' || it.kind === 'heading' || it.kind === 'row') step = -1;
   });
   return { note, owner, runs };
 }
@@ -6433,6 +6977,31 @@ function protClean(text) {
     it.text = it.text.replace(/\*([^*\n]+)\*/g, (_, inner) => { marks++; return inner; });
   });
   return { text: protSerialize(protTidy(kept)), notes, marks };
+}
+
+/** The gel samples a protocol writes in the comment color.
+ *
+ *  The lab's own binder template marks `SDS-PAGE sample: 15 µL lysate` in its
+ *  second color, the same one a day's comments are in, because taking a sample
+ *  for the gel is a different kind of thing from the prep rather than a note
+ *  about one day of it.  Read as a comment, every one of those lines is dropped
+ *  the moment the recipe is taken fresh -- and they are exactly the lines that
+ *  say which lane of the blot is which sample, which is the whole of what a
+ *  protocol is doing next to a figure.  So a comment that names a sample it
+ *  takes is a step.
+ *
+ *  Only when the words say `sample` or `aliquot` in the present tense: `kept
+ *  20 µL of the lysate` is a note about what happened, and the dropdown on the
+ *  row is the repair either way. */
+function protSampleSteps(text) {
+  let n = 0;
+  const items = protParse(text).map(it => {
+    if (it.kind !== 'comment' || !/\b(sampl(?:e|es|ing)|aliquots?)\b/i.test(it.text)
+        || !protSample(it.text)) return it;
+    n++;
+    return { kind: 'step', text: it.text };
+  });
+  return { text: n ? protSerialize(items) : String(text || ''), n };
 }
 
 //: The units an amount is written in.  These are the only ones that scale with
@@ -6506,11 +7075,25 @@ function scaleLine(s, k, wrap, hold) {
 /** The whole protocol at `k` times the recipe.  Only steps and the lines under
  *  them scale: a title and a heading carry dates, and a comment is what was
  *  measured on the day, which no factor applies to. */
-function protScale(text, k, wrap, taken) {
+function protScale(text, k, wrap, taken, cv) {
   const items = protParse(text);
+  //: The resin is in play only when this run packed a different column from
+  //: the one the protocol is written for.
+  const bed = cv && +cv.base > 0 && +cv.mL > 0 && r2(+cv.mL) !== r2(+cv.base) ? cv : null;
   let n = 0;
-  if (k !== 1) items.forEach(it => {
+  if (k !== 1 || bed) items.forEach(it => {
     if (it.kind !== 'step' && it.kind !== 'line') return;
+    // A volume counted in column volumes belongs to the resin and not to the
+    // pellet: 40 CV of wash is 40 CV of wash whatever the pellet weighed, and
+    // doubling it because the pellet doubled washes a column with twice what
+    // it holds.  Those lines are set from the resin instead, below.
+    if (cvGoverns(it.text)) {
+      if (!bed) return;
+      const r = cvLine(it.text, +bed.mL, +bed.base, wrap);
+      it.text = r.s; n += r.n;
+      return;
+    }
+    if (k === 1) return;
     const r = scaleLine(it.text, k, wrap, it.kind === 'step' && !!protSampleOf(it.text, taken));
     it.text = r.s; n += r.n;
   });
@@ -6536,6 +7119,15 @@ const rotorHolds = r => r.tubes * r.mL;
 
 const VOL_ML = { l: 1000, dl: 100, cl: 10, ml: 1, 'µl': 0.001, 'μl': 0.001, ul: 0.001 };
 
+/** The g-force a step spins at, in x g: `85kg` and `20,000 x g` are both read,
+ *  and the largest one on the line is the one that counts. */
+function protG(s) {
+  let g = 0;
+  String(s).replace(/(\d[\d,]*(?:\.\d+)?)\s*(k?)\s*(?:[x\u00d7]\s*)?g\b/gi,
+    (m, n, k) => { g = Math.max(g, cvNum(n) * (k ? 1000 : 1)); return m; });
+  return g;
+}
+
 /** The largest volume written in a line, in mL.  A unit followed by `/` is a
  *  rate, not an amount, and is not one. */
 function protVolume(s) {
@@ -6559,6 +7151,10 @@ function protVolume(s) {
 function protSpin(items, i) {
   const t = items[i].text;
   if (!/\b(centrifug\w*|ultracentrifug\w*|spin|spun)\b/i.test(t)) return '';
+  // Both rotors below are an ultracentrifuge's.  A lysate cleared at 20,000 x g
+  // goes in a benchtop rotor this does not know about, and the wrong rotor is
+  // worse advice than none at all.
+  if (protG(t) < 50000 && !/\bultracentrifug/i.test(t)) return '';
   let v = 0;
   for (let j = i; j >= 0; j--) {
     if (items[j].kind === 'heading' || items[j].kind === 'title') break;
@@ -6617,6 +7213,137 @@ function protK(P) {
   return (+p.g) / base;
 }
 
+/* ---- the resin, and the column volumes counted in it -------------------
+ *
+ * A column protocol is not written in millilitres.  It is written in column
+ * volumes -- 40 CV of wash, 5 CV of eluate -- and the 80 mL and 10 mL beside
+ * them are only what that comes to for the 2 mL of resin the protocol assumes.
+ * Pack 3 mL because the expression was good, as the protocol itself says to,
+ * and every one of those numbers is wrong; and the pellet mass, which scales
+ * everything else, says nothing about it, because the resin is a decision and
+ * not a weight.
+ *
+ * So the bed volume is a field per construct, the CV count written on the line
+ * is the authority, and the millilitres are computed from it rather than
+ * multiplied -- 40 CV is 120 mL at 3 mL of resin, with no factor in between.
+ */
+
+const cvNum = s => parseFloat(String(s).replace(/,/g, ''));
+
+//: A count of column volumes, written either way round.
+const CV_COUNT = /(\d[\d,]*(?:\.\d+)?)\s*(?:CV|column volumes?)\b/gi;
+const CV_SAYS = /\d\s*(?:CV|column volumes?)\b/i;
+//: A volume that is the resin itself: `2 mL Ni-NTA resin`, `2 mL bed volume`.
+const CV_RESIN = /(\d[\d,]*(?:\.\d+)?)\s*ml\s+(?:of\s+)?(?:[\w-]+\s+){0,3}(?:resin|beads|bed volume|slurry)\b/i;
+
+/** The millilitres in one column volume, as the protocol is written: what it
+ *  says a CV is, the bed volume it names, or what a pair of them comes to --
+ *  `40 CV (80 mL for 2 mL resin)` and `E2: 5 mL elution buffer (2.5 CV)` both
+ *  say 2 mL a CV without ever saying it. */
+function protBed(text) {
+  let mL = 0;
+  protParse(text).some(it => {
+    if (it.kind !== 'step' && it.kind !== 'line') return false;
+    const t = it.text;
+    const said = /\b1\s*(?:CV|column volume)\s*=\s*(\d[\d,]*(?:\.\d+)?)\s*ml\b/i.exec(t)
+              || /(\d[\d,]*(?:\.\d+)?)\s*ml\s+bed volume/i.exec(t);
+    if (said) mL = cvNum(said[1]);
+    else {
+      const fwd = /(\d[\d,]*(?:\.\d+)?)\s*(?:CV|column volumes?)\b[^.;]{0,40}?\(\s*(\d[\d,]*(?:\.\d+)?)\s*ml\b/i.exec(t);
+      const back = /(\d[\d,]*(?:\.\d+)?)\s*ml\b[^.;]{0,40}?\(\s*(\d[\d,]*(?:\.\d+)?)\s*(?:CV|column volumes?)\b/i.exec(t);
+      if (fwd && cvNum(fwd[1]) > 0) mL = cvNum(fwd[2]) / cvNum(fwd[1]);
+      else if (back && cvNum(back[2]) > 0) mL = cvNum(back[1]) / cvNum(back[2]);
+    }
+    return mL > 0;
+  });
+  return mL > 0 ? r2(mL) : 0;
+}
+
+/** True when the resin is what sets the volumes on this line: it counts them
+ *  in column volumes, or it names a volume of resin. */
+const cvGoverns = s => CV_SAYS.test(s) || CV_RESIN.test(s);
+
+/** One line's volumes at the resin this run actually packed.
+ *
+ *  Every CV count on the line says what it came to for the resin the protocol
+ *  assumes -- that is the number written beside it -- so each of those
+ *  millilitre values is replaced by what the same count comes to now.  The
+ *  resin's own volume goes with them, which is what moves the `2 mL resin` in
+ *  `80 mL for 2 mL resin` along with the 80.
+ *
+ *  ponytail: matched by value, so a volume on the line that happens to equal
+ *  one of them moves too.  The form marks every number it touched and the
+ *  recipe itself is never rewritten, so reading it is the repair. */
+function cvLine(s, bed, base, wrap) {
+  const t = String(s);
+  if (!(bed > 0) || !(base > 0)) return { s: t, n: 0 };
+  const want = new Map([[r2(base), r2(bed)]]);
+  t.replace(CV_COUNT, (m, c) => {
+    const v = cvNum(c);
+    if (v > 0) want.set(r2(v * base), r2(v * bed));
+    return m;
+  });
+  let n = 0;
+  const out = t.replace(/(\d[\d,]*(?:\.\d+)?)(\s*)(ml)\b/gi, (m, num, gap, u) => {
+    const was = r2(cvNum(num)), to = want.get(was);
+    if (to === undefined || to === was) return m;
+    n++;
+    return wrap ? `\u0001${to}${gap}${u}\u0002` : `${to}${gap}${u}`;
+  });
+  return { s: out, n };
+}
+
+/** How many conditions this run is: the constructs side by side, which is the
+ *  pellet rows with anything in them.  A protocol is written for one column and
+ *  everything under it is per column, so this is the number the day's totals
+ *  are multiplied by -- never the steps themselves, which say what to do to one
+ *  construct and say it once however many there are. */
+function protConditions(P) {
+  const rows = (P && P.pellets) || [];
+  return Math.max(1, rows.filter(x => String(x.c || '').trim() || +x.g > 0 || +x.r > 0).length);
+}
+
+/** What a per-construct step comes to for the whole day, or nothing at all:
+ *  nothing for one condition, and nothing for a step whose volumes are not per
+ *  construct.  Six binders is still 3 mL of resin a column and six times the
+ *  wash buffer, and the buffer is the thing you have to make before you start.
+ *
+ *  Read off the line, never written into it -- the step itself stays what to do
+ *  to one construct, which is what you follow at the bench. */
+function protPer(text, n) {
+  if (!(n > 1)) return '';
+  if (!cvGoverns(text) && !/\bper (?:construct|condition|binder|column|sample)\b/i.test(text)) return '';
+  const seen = [];
+  String(text).replace(/(\d[\d,]*(?:\.\d+)?)\s*ml\b/gi, (m, num, at, str) => {
+    // `scale up to 3-4 mL of resin` is a range to choose from, not 4 mL of
+    // anything, and the top of one is no part of a total.
+    if (/[\u2012-\u2015-]\s*$/.test(str.slice(0, at))) return m;
+    const v = cvNum(num);
+    if (v >= 1 && !seen.includes(v)) seen.push(v);
+    return m;
+  });
+  return seen.length
+    ? `×${n} conditions: ` + seen.map(v => `${r2(v)} → ${r2(v * n)} mL`).join(', ')
+    : '';
+}
+
+/** The column volume the sheet is reading at: what the protocol is written for,
+ *  and what this construct's column actually is. */
+function protCV(P) {
+  const p = protPellet(P) || {}, base = +P.bed || 0;
+  return { base, mL: +p.r > 0 ? +p.r : base };
+}
+
+/** True when this run's column is not the protocol's. */
+function protCVmoved(P) {
+  const c = protCV(P);
+  return c.base > 0 && c.mL > 0 && r2(c.mL) !== r2(c.base);
+}
+
+/** Whether to ask about the resin at all: only a protocol that counts in
+ *  column volumes has a bed volume worth a field. */
+const protHasCV = P => +P.bed > 0 || CV_SAYS.test(P.text || '');
+
 /* ---- the samples a purification takes of itself ------------------------
  *
  * A prep takes a little of itself at every stage — lysate, flow-through,
@@ -6634,6 +7361,7 @@ const PROT_SAMPLES = [
   ['flow-through', 'flow-through', /\bflow[-\s]?through\b|\bFT\b/],
   ['wash', 'wash', /\bwash(?:es|ed|ing)?\b/i],
   ['eluate', 'eluate', /\belu(?:ate|ates|tion|ted)\b/i],
+  ['SEC fraction', 'SEC fraction', /\bSEC\b|\bsize[-\s]exclusion\b/i],
   ['supernatant', 'sample', /\bsupernatant\b|\bSN\b/],
   ['pellet', 'sample', /\bpellet\b/i],
   ['load', 'load', /\bload(?:ed|ing)?\b/i],
@@ -6642,7 +7370,9 @@ const PROT_SAMPLES = [
 /** The sample a step takes, or nothing at all.  A step that takes one says so:
  *  it takes a sample or an aliquot, or it keeps a small volume of something a
  *  gel shows later.  Resuspending a pellet and loading a column are not taking
- *  a sample, which is why the word has to be in it.
+ *  a sample, which is why the word has to be in it -- and the word on its own
+ *  is not enough either, because a protocol says `with more than one sample,
+ *  alternate between them` and `¼ of the sample volume` while taking nothing.
  *
  *  ponytail: words, not a model of a purification.  A step that takes a sample
  *  without saying so stays black and is offered no lane — the upgrade is a
@@ -6654,8 +7384,11 @@ function protSample(s) {
   if (!said && !(took && protSampleVol(t))) return '';
   const hit = PROT_SAMPLES.find(x => x[2].test(t));
   // Without the word and without a name, it is a step that keeps something on
-  // ice rather than a sample for a gel, and guessing is worse than not.
-  return hit ? hit[0] : (said ? 'sample' : '');
+  // ice rather than a sample for a gel, and guessing is worse than not.  With
+  // the word and nothing else, it has to say how much it takes: an unnamed
+  // stage and no volume is a step that mentions samples rather than one that
+  // takes one.
+  return hit ? hit[0] : (said && protSampleVol(t) ? 'sample' : '');
 }
 
 /** A volume small enough to be a sample taken for a gel: any microliter
@@ -6790,7 +7523,8 @@ function protFreshRun(P) {
   P.reads = {};
   P.scale = 1;
   P.base = protBaseMass(P.text) || P.base;
-  P.pellets = [{ id: uid(), c: '', g: P.base || 0 }];
+  P.bed = protBed(P.text) || P.bed;
+  P.pellets = [{ id: uid(), c: '', g: P.base || 0, r: P.bed || 0 }];
   P.pellet = P.pellets[0].id;
 }
 
@@ -6798,8 +7532,44 @@ let protTab = 'form';
 
 /** The protocol as a form: the steps as they are written, each with the field
  *  for what actually happened at it. */
+/** The protocol's own table, as a table.
+ *
+ *  A form with a row per construct is the one thing in a protocol that is
+ *  neither a step nor a note: shredded into lines it stops being fillable,
+ *  which is the whole of what it is for.  The computed columns are cells and
+ *  not inputs -- what the sheet worked out should never look like something
+ *  typed -- and a construct dragged out of the figure onto a row fills in the
+ *  rest of what the sequence knows.
+ *
+ *  ponytail: 13 columns do not fit a 372px sheet, so the table scrolls
+ *  sideways.  Tables do that. */
+function protTable(at, rows, editable) {
+  const head = rows[0] || [];
+  const cols = protRowCols(head), calc = protRowCalc(cols);
+  const wide = Math.max(...rows.map(r => r.length));
+  const named = cols.indexOf('id') >= 0;
+  const th = [];
+  for (let c = 0; c < wide; c++)
+    th.push(`<th${cols[c] ? ` class="pc-${cols[c]}"` : ''}>${esc(head[c] ?? '')}</th>`);
+  const body = rows.slice(1).map((cells, r) => {
+    const i = at + 1 + r, tds = [];
+    for (let c = 0; c < wide; c++) {
+      const v = cells[c] == null ? '' : cells[c];
+      if (calc[c]) tds.push(`<td class="prot-calc" title="Worked out, not typed">${esc(v)}</td>`);
+      else if (!editable) tds.push(`<td>${esc(v)}</td>`);
+      else tds.push(`<td><input data-pt="${i}" data-pcell="${c}" value="${esc(v)}"` +
+        (cols[c] === 'id' ? ' placeholder="drop a construct"' : '') + `></td>`);
+    }
+    return `<tr data-prow="${i}"${named ? '' : ' class="no-id"'}>${tds.join('')}</tr>`;
+  }).join('');
+  return `<div class="prot-tab"><table><thead><tr>${th.join('')}</tr></thead>` +
+         `<tbody>${body}</tbody></table></div>`;
+}
+
 function protForm(items, editable, P) {
   const { note, owner, runs } = protShape(items);
+  const tabs = protTables(items);
+  const conds = protConditions(P);
   const claimed = new Set(note.values());
   const samples = protSamples(items, P && P.taken);
   const links = (P && P.samples) || {};
@@ -6845,6 +7615,7 @@ ${j === '' ? '' : esc(block(j))}</textarea>`;
     } else if (it.kind === 'step') {
       step++;
       const spin = protSpin(items, i);
+      const per = protPer(it.text, conds);
       const samp = samples.get(i);
       const meas = protMeasure(it.text);
       // Blue is a step whose answer is not in the protocol: the sample that
@@ -6855,14 +7626,23 @@ ${j === '' ? '' : esc(block(j))}</textarea>`;
            row(editable ? put(i, it.text, cls) : read(i, it.text, cls),
                kindSel(i, samp ? 'sample' : 'step')) +
            (spin ? `<div class="prot-rotor">${esc(spin)}</div>` : '') +
+           (per ? `<div class="prot-rotor">${esc(per)}</div>` : '') +
            (samp ? protLinkRow(samp, links, choices) : '') +
            (meas ? protReadRow(protTakenKey(it.text), reads[protTakenKey(it.text)]) : '') +
            row(noteField(i), note.has(i) ? kindSel(note.get(i), 'comment') : '') +
            `</div></div>`;
+    } else if (it.kind === 'row') {
+      // A scaled view is read-only because editing the recipe through it would
+      // write the scaled numbers back.  The Overview is not the recipe -- it is
+      // what the run got -- so it is filled in whatever the view is doing, and
+      // a row is the same line in the scaled items as in the text.
+      if (tabs[i]) h += protTable(i, tabs[i], true);
     } else if (it.kind === 'line') {
+      const per = protPer(it.text, conds);
       h += `<div class="prot-sub">` +
            row(editable ? put(i, it.text, 'prot-what') : read(i, it.text, 'prot-what'),
-               kindSel(i, 'line')) + `</div>`;
+               kindSel(i, 'line')) +
+           (per ? `<div class="prot-rotor">${esc(per)}</div>` : '') + `</div>`;
     } else if (owner.get(i) === i && !claimed.has(i)) {
       h += `<div class="prot-free">` +
            row(`<textarea class="prot-note" data-pn="${i}" data-pc="${runs.get(i)}" rows="1"
@@ -6871,7 +7651,8 @@ ${esc(block(i))}</textarea>`, kindSel(i, 'comment')) + `</div>`;
     }
   });
   return any ? h : `<p class="note">Nothing here yet. <b>Import from Word…</b> reads a .docx
-    protocol — headings, steps, and whatever was written in another color on the day.</p>`;
+    protocol — headings, steps, and whatever was written in another color on the day.
+    <b>Library…</b> is the ones already kept: a folder of protocols, Word files and all.</p>`;
 }
 
 /** The protocol lives on its own sheet beside the canvas, not in a dialog:
@@ -6880,10 +7661,20 @@ ${esc(block(i))}</textarea>`, kindSel(i, 'comment')) + `</div>`;
 function protocolSheet(focus) {
   const P = protocolDoc();
   const k = protK(P);
-  const view = protScale(P.text, k, true, P.taken);
-  const flat = protScale(P.text, k, false, P.taken).text;
-  const editable = k === 1;
+  const cv = protCV(P), cvs = protHasCV(P), moved = protCVmoved(P);
+  const view = protScale(P.text, k, true, P.taken, cv);
+  const flat = protScale(P.text, k, false, P.taken, cv).text;
+  //: The fields hold the scaled view, so a protocol being read at anything
+  //: other than what it says is read-only -- typing into a recomputed number
+  //: would write it into the recipe.
+  const editable = k === 1 && !moved;
   const sheet = $('#protsheet');
+  // Where the sheet was scrolled to is not part of the document, and losing it
+  // on every redraw -- a drop on a row, an undo -- is losing your place in a
+  // long protocol and in a table too wide to see at once.
+  const body0 = sheet.querySelector('.prot-body');
+  const was = { y: body0 ? body0.scrollTop : 0,
+                x: [...sheet.querySelectorAll('.prot-tab')].map(t => t.scrollLeft) };
   sheet.hidden = false;
   $('#protocol').classList.add('on');
   sheet.innerHTML = `
@@ -6902,6 +7693,9 @@ function protocolSheet(focus) {
         <button id="protClean" class="ghost small"
           title="Drop the comments and unmark the values written over the recipe — the protocol, ready to run again">Clear comments</button>
         <button id="protImport" class="ghost small">Import from Word…</button>
+        <select id="protLib" class="mini"><option value="">Library…</option></select>
+        <button id="protLibAdd" class="ghost small"
+          title="Keep this protocol in the library, under its own title">Save to library</button>
         <span class="spacer"></span>
         <button id="protDocx" class="small" title="The protocol and the figure in one Word file">.docx</button>
         <button id="protPdf" class="small">.pdf</button>
@@ -6910,12 +7704,17 @@ function protocolSheet(focus) {
         <label title="The pellet mass the protocol itself is written for — read off the first mass in it. Type over it if the protocol means another.">written for
           <input id="protBase" type="number" step="0.5" min="0" max="100000"
             value="${P.base || ''}" placeholder="?"> g</label>
+        ${cvs ? `<label title="One column volume as the protocol is written — the resin it assumes. Read off its own words, and typed over if it means another.">1 CV =
+          <input id="protBed" type="number" step="0.5" min="0" max="10000"
+            value="${P.bed || ''}" placeholder="?"> mL</label>` : ''}
         <span class="spacer"></span>
+        <span class="dim">${protConditions(P) > 1 ? protConditions(P) + ' conditions' : ''}</span>
         <button id="protPelAdd" class="ghost small"
-          title="Another pellet — the other construct from the same day">+ pellet</button>
+          title="Another pellet — the other construct from the same day. Every one of them is a condition, and the buffers are per construct.">+ pellet</button>
       </div>
       ${P.pellets.map(x => {
         const kx = (+P.base > 0 && +x.g > 0) ? (+x.g) / (+P.base) : 0;
+        const kr = (+P.bed > 0 && +x.r > 0) ? (+x.r) / (+P.bed) : 0;
         return `<div class="prot-pel${x.id === P.pellet ? ' on' : ''}">
           <input type="radio" name="protpel" data-pelsel="${x.id}"${x.id === P.pellet ? ' checked' : ''}
             title="Read the protocol at this pellet">
@@ -6923,18 +7722,26 @@ function protocolSheet(focus) {
             placeholder="construct" title="What is in this pellet">
           <input class="pel-g" data-pel="${x.id}" data-pk="g" type="number" step="0.5" min="0"
             value="${x.g || ''}" placeholder="g" title="What it weighs"> g
-          <span class="dim">${kx ? '×' + r2(kx) : ''}</span>
+          ${cvs ? `<input class="pel-r" data-pel="${x.id}" data-pk="r" type="number" step="0.5" min="0"
+            value="${x.r || ''}" placeholder="mL"
+            title="The resin packed for this construct — one column volume of it"> mL resin` : ''}
+          <span class="dim">${[kx ? '×' + r2(kx) : '',
+                               kr && r2(kr) !== 1 ? 'CV ×' + r2(kr) : ''].filter(Boolean).join(' ')}</span>
           ${P.pellets.length > 1
             ? `<button class="ghost small" data-peldel="${x.id}" title="Drop this pellet">✕</button>` : ''}
         </div>`;
       }).join('')}
       <div class="prot-bar">
         <button id="protReset" class="ghost small"${editable ? ' disabled' : ''}
-          title="Back to the protocol as written: the pellet goes back to the mass it was written for">reset</button>
-        <span class="dim">${k === 1
-          ? 'volumes, masses and moles scale with the pellet — concentrations, times and speeds do not'
-          : `×${r2(k)} · ${view.n} quantit${view.n === 1 ? 'y' : 'ies'} scaled · ` +
-            `steps read-only until reset · check containers written as amounts`}</span>
+          title="Back to the protocol as written: the pellet and the column go back to what it was written for">reset</button>
+        <span class="dim">${editable
+          ? 'volumes, masses and moles scale with the pellet — concentrations, times and speeds do not' +
+            (cvs ? '; the volumes counted in CV follow the resin instead' : '')
+          : [k === 1 ? '' : `×${r2(k)}`,
+             moved ? `1 CV = ${r2(cv.mL)} mL` : '',
+             `${view.n} quantit${view.n === 1 ? 'y' : 'ies'} recomputed`,
+             'steps read-only until reset', 'check containers written as amounts']
+            .filter(Boolean).join(' · ')}</span>
       </div>
       <div class="prot-body">${protTab === 'form'
         ? `<div class="prot-doc">${protForm(view.items, editable, P)}</div>`
@@ -6951,6 +7758,15 @@ function protocolSheet(focus) {
   $('#protClose').onclick = protocolClose;
   $('#protCopy').onclick = () => navigator.clipboard.writeText(flat).then(() => hint('Copied.'));
   $('#protImport').onclick = protocolImport;
+  $('#protLibAdd').onclick = protLibAdd;
+  // Back to the placeholder after it is picked, so the same protocol can be
+  // read in twice -- after an undo, say.
+  $('#protLib').onchange = ev => {
+    const path = ev.target.value;
+    ev.target.value = '';
+    if (path) protocolLoad(path);
+  };
+  protLibRead();
   $('#protDocx').onclick = () => protocolExport('docx');
   $('#protPdf').onclick = () => protocolExport('pdf');
   // A mass is the scale, so it is read when the field is left rather than at
@@ -6959,9 +7775,12 @@ function protocolSheet(focus) {
   $('#protBase').onchange = ev => {
     mark('protbase'); P.base = +ev.target.value || 0; touch(); protocolSheet();
   };
+  if ($('#protBed')) $('#protBed').onchange = ev => {
+    mark('protbed'); P.bed = +ev.target.value || 0; touch(); protocolSheet();
+  };
   $('#protPelAdd').onclick = () => {
     mark();
-    P.pellets.push({ id: uid(), c: '', g: P.base || 0 });
+    P.pellets.push({ id: uid(), c: '', g: P.base || 0, r: P.bed || 0 });
     P.pellet = P.pellets[P.pellets.length - 1].id;
     touch(); protocolSheet();
   };
@@ -6981,16 +7800,16 @@ function protocolSheet(focus) {
       const x = P.pellets.find(y => y.id === el.dataset.pel);
       if (!x) return;
       mark('protpel' + el.dataset.pel + el.dataset.pk);
-      x[el.dataset.pk] = el.dataset.pk === 'g' ? (+el.value || 0) : el.value;
+      x[el.dataset.pk] = el.dataset.pk === 'c' ? el.value : (+el.value || 0);
       touch();
     };
-    if (el.dataset.pk === 'g') el.onchange = () => { edit(); protocolSheet(); };
+    if (el.dataset.pk !== 'c') el.onchange = () => { edit(); protocolSheet(); };
     else el.oninput = edit;
   });
   $('#protReset').onclick = () => {
     mark(); P.scale = 1;
     const x = protPellet(P);
-    if (x) x.g = P.base || 0;
+    if (x) { x.g = P.base || 0; x.r = P.bed || 0; }
     touch(); protocolSheet();
   };
   $('#protClean').onclick = () => {
@@ -7009,6 +7828,9 @@ function protocolSheet(focus) {
     ta.oninput = () => { P.text = ta.value; touch(); };
   }
   bindProtForm(P);
+  const body1 = sheet.querySelector('.prot-body');
+  if (body1) body1.scrollTop = was.y;
+  sheet.querySelectorAll('.prot-tab').forEach((t, i) => { t.scrollLeft = was.x[i] || 0; });
   if (focus) {
     const el = sheet.querySelector(focus);
     if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
@@ -7040,6 +7862,75 @@ const protCleanSaid = c =>
  *  The form is rebuilt only when the number of lines changes — adding a comment
  *  to a step, or emptying one — because rebuilding it under a hand that is
  *  typing takes the cursor with it. */
+/** The table row under the pointer, while a single construct is being dragged.
+ *
+ *  Read in client coordinates because the sheet is not the canvas: the pointer
+ *  has left the figure by the time it is over a row. */
+function protDropRow(ev, drag) {
+  document.querySelectorAll('tr.prot-on').forEach(el => el.classList.remove('prot-on'));
+  const g = drag.orig.length === 1 && node(drag.orig[0].id);
+  if (!g || g.type !== 'construct') return null;
+  const el = document.elementFromPoint(ev.clientX, ev.clientY);
+  const tr = el && el.closest && el.closest('tr[data-prow]:not(.no-id)');
+  if (tr) tr.classList.add('prot-on');
+  return tr ? +tr.dataset.prow : null;
+}
+
+function protRowDrop(g, drag) {
+  document.querySelectorAll('tr.prot-on').forEach(el => el.classList.remove('prot-on'));
+  const P = doc.protocol;
+  if (!g || !P) return;
+  if (!drag.marked) mark();
+  drag.orig.forEach(o => { const n = node(o.id); n.x = o.x; n.y = o.y; });
+  const items = protParse(P.text);
+  if (!items[drag.row] || items[drag.row].kind !== 'row') return;
+  let head = drag.row;
+  while (head > 0 && items[head - 1].kind === 'row') head--;
+  const cols = protRowCols(protRowCells(items[head].text));
+  const ii = cols.indexOf('id');
+  if (ii < 0) return;
+  const cells = protRowCells(items[drag.row].text);
+  while (cells.length <= ii) cells.push('');
+  cells[ii] = (g.title || '').trim() || 'construct';
+  // Emptied so the construct fills them: `protRowDerive` keeps whatever is in
+  // them otherwise, and dropping a second construct on a row has to answer.
+  ['mw', 'eps'].forEach(k => { const j = cols.indexOf(k); if (j >= 0) cells[j] = ''; });
+  items[drag.row] = { kind: 'row', text: protRowText(protRowDerive(cells, cols)) };
+  // Filling the last row of the form leaves another one under it: six rows is
+  // what this template came with, and a seventh construct should not need the
+  // Word file opened again.
+  if (items[drag.row + 1] == null || items[drag.row + 1].kind !== 'row')
+    items.splice(drag.row + 1, 0, { kind: 'row', text: protRowText(cells.map(() => '')) });
+  P.text = protSerialize(items);
+  touch(); protocolRedraw();
+  const q = protConstructOf(cells[ii]);
+  hint(`${cells[ii]} is on that row` + (!q ? '.' :
+       q.a01 ? `: ${r2(q.mw / 1000)} kDa, A 0.1% ${r3(q.a01)}.`
+             : `: ${r2(q.mw / 1000)} kDa — ε needs the sequence, not just the length.`));
+}
+
+/** One cell of a table, written back into the line it came from.
+ *
+ *  Writing a cell works the row's columns out again: a volume typed in is a
+ *  glycerol volume and a final concentration too. */
+function protCellWrite(P, i, c, value) {
+  const items = protParse(P.text);
+  if (!items[i] || items[i].kind !== 'row') return;
+  let head = i;
+  while (head > 0 && items[head - 1].kind === 'row') head--;
+  const cols = protRowCols(protRowCells(items[head].text));
+  const cells = protRowCells(items[i].text);
+  while (cells.length <= c) cells.push('');
+  // A pipe typed into a cell would be another cell.
+  cells[c] = String(value).replace(/\|/g, '/').trim();
+  mark('protcell' + i + '.' + c);
+  protRowDerive(cells, cols);
+  items[i] = { kind: 'row', text: protRowText(cells) };
+  P.text = protSerialize(items);
+  touch();
+  return { cells, cols };
+}
+
 function bindProtForm(P) {
   const body = $('#protsheet');
   const write = (i, kind, value) => {
@@ -7114,6 +8005,22 @@ function bindProtForm(P) {
   // written into the text; taking a sample is a reading of a step and is kept
   // beside it, under the step's own words.  A comment is as many lines as it
   // has, and all of them change together.
+  // The sheet is redrawn, not patched: the cells this one computes are on the
+  // same row and the ones it does not are now read-only or no longer are.
+  // Only the two computed cells of this one row change, so they are written
+  // where they stand.  Rebuilding the sheet on a cell edit took the cursor out
+  // of the next cell mid-Tab and scrolled a 13-column table back to its first
+  // column -- the same trap the note fields are bound around.
+  body.querySelectorAll('input[data-pt]').forEach(el => {
+    el.oninput = () => {
+      const r = protCellWrite(P, +el.dataset.pt, +el.dataset.pcell, el.value);
+      const tr = el.closest('tr[data-prow]');
+      if (!r || !tr) return;
+      [...tr.children].forEach((td, c) => {
+        if (td.classList.contains('prot-calc')) td.textContent = r.cells[c] ?? '';
+      });
+    };
+  });
   body.querySelectorAll('[data-pkind]').forEach(el => {
     el.onchange = () => {
       const i = +el.dataset.pkind, want = el.value;
@@ -7183,15 +8090,76 @@ async function protocolReadTecan(key) {
   }
 }
 
+/** The library is a folder of protocols and nothing else -- the file is the
+ *  entry and its name is the entry's name.  So an entry goes in by copying a
+ *  Word protocol into the folder, the library is backed up by copying that
+ *  folder, and there is no index to keep in step with what is in it.
+ *
+ *  Read once and kept: the sheet redraws whenever a line is added or taken
+ *  away, and a listing per redraw would be a request per keystroke. */
+let protLib = null;
+async function protLibRead(again) {
+  if (!protLib || again) {
+    try { protLib = await api('/api/protocol/library'); }
+    catch { protLib = { dir: '', entries: [] }; }
+  }
+  protLibOptions();
+  return protLib;
+}
+
+/** Filled in place rather than by redrawing the sheet, which would take the
+ *  cursor out of whatever is being typed into. */
+function protLibOptions() {
+  const sel = $('#protLib');
+  if (!sel || !protLib) return;
+  const n = protLib.entries.length;
+  sel.innerHTML = '<option value="">Library…</option>' +
+    protLib.entries.map(e => `<option value="${esc(e.path)}">${esc(e.name)}</option>`).join('');
+  sel.title = (n ? `${n} protocol${n === 1 ? '' : 's'} in the library. ` : 'The library is empty. ') +
+    `It is a folder — ${protLib.dir} — so a Word protocol copied into it is an entry too.`;
+}
+
+/** This protocol into the library, named by its own title line. */
+async function protLibAdd() {
+  const P = protocolDoc();
+  if (!P.text.trim()) { hint('Nothing to keep yet — import a protocol first.', true); return; }
+  if (!backend.ok) { hint('The library is a folder on this computer, so it needs the backend.', true); return; }
+  const name = (protTitleOf(P.text) || defaultName()).slice(0, 80);
+  try {
+    // The text as it stands, not the scaled view and not this run's: what a
+    // library entry is for is being run again, and the day comes off it on the
+    // way back in -- the one rule, in the one place, `protocolLoad`.
+    const r = await api('/api/protocol/library/add', { name, text: P.text });
+    await protLibRead(true);
+    hint(`Kept as ${r.file} in the library — ${r.dir}.` +
+         (r.name === name ? '' : ' That name was taken, so it is beside the one already there.'));
+  } catch (err) {
+    hint('Could not keep it: ' + err.message, true);
+  }
+}
+
+const protTitleOf = text => ((String(text || '').match(/^# +(.+)$/m) || [, ''])[1] || '').trim();
+
 async function protocolImport() {
   const p = await LK.browse({ mode: 'file', exts: ['.docx'], title: 'The Word protocol' });
-  if (!p) return;
+  if (p) await protocolLoad(p);
+}
+
+/** A protocol into the figure, from Word or from the library: the same read
+ *  either way, because the library keeps both kinds. */
+async function protocolLoad(p) {
   try {
     const r = await api('/api/protocol/open', { path: p });
     const P = protocolDoc();
     mark();
-    P.text = r.text; P.color = r.color; P.src = r.path;
-    P.base = protBaseMass(r.text);
+    // A line in the comment color that says it takes a sample for the gel is a
+    // step, not a note about a day: the lab's own template writes all five of
+    // them that way, and as comments they would be dropped the moment the
+    // recipe is taken fresh.
+    const blue = protSampleSteps(r.text);
+    P.text = blue.text; P.color = r.color; P.src = r.path;
+    P.base = protBaseMass(P.text);
+    P.bed = protBed(P.text);
     protFreshRun(P);
     // A protocol imported into a figure is the record of that experiment and
     // keeps its day on it.  A protocol imported on its own is one about to be
@@ -7202,11 +8170,17 @@ async function protocolImport() {
     if (c && (c.notes || c.marks)) P.text = c.text;
     touch();
     protocolSheet();
-    hint(c && (c.notes || c.marks)
+    const took = blue.n ? ` ${blue.n} sample line${blue.n === 1 ? '' : 's'} read as steps.` : '';
+    const bed = P.bed ? ` It counts in column volumes — 1 CV = ${r2(P.bed)} mL as written.` : '';
+    hint((c && (c.notes || c.marks)
       ? `Read ${r.name} — ${protCleanSaid(c).replace(/^No comments/, 'nothing')} ` +
         `It is the recipe again, ready to run. ⌘Z keeps the day on it.`
-      : `Read ${r.name} — the comments in it are ${r.color}. ` +
-        `Look over the headings: which lines are headings is a guess.`);
+      : /\.docx$/i.test(p)
+        // Which lines are headings is a guess about a Word file.  A library
+        // entry the app wrote says so itself, in its own `##`.
+        ? `Read ${r.name} — the comments in it are ${r.color}. ` +
+          `Look over the headings: which lines are headings is a guess.`
+        : `Read ${r.name}, out of the library.`) + took + bed);
   } catch (err) {
     hint('Could not read that protocol: ' + err.message, true);
   }
@@ -7248,10 +8222,13 @@ async function protocolExport(fmt) {
  *  everything else that belongs to this run rather than to the recipe. */
 function protOut(P) {
   const k = protK(P);
-  const out = protScale(P.text, k, false, P.taken);
+  const cv = protCV(P), moved = protCVmoved(P), conds = protConditions(P);
+  const out = protScale(P.text, k, false, P.taken, cv);
   const items = out.items;
   const p = protPellet(P) || {};
-  const whose = [String(p.c || '').trim(), +p.g > 0 ? `${r2(+p.g)} g pellet` : ''].filter(Boolean).join(', ');
+  const whose = [String(p.c || '').trim(),
+                 +p.g > 0 ? `${r2(+p.g)} g pellet` : '',
+                 +p.r > 0 && cv.base > 0 ? `${r2(+p.r)} mL of resin` : ''].filter(Boolean).join(', ');
   const scaled = k !== 1 && out.n;
   // What this run attached to a step and the protocol itself does not say:
   // which lane each sample became, and what the plate reader answered.  The
@@ -7271,13 +8248,26 @@ function protOut(P) {
     const got = it.kind === 'step' && reads[protTakenKey(it.text)];
     if (got) protReadLines(got).forEach(l => add(i, l));
   });
+  // What a day of several constructs has to have made up before it starts: the
+  // steps are per construct, and this is the same step times the conditions.
+  if (conds > 1) items.forEach((it, i) => {
+    const per = (it.kind === 'step' || it.kind === 'line') ? protPer(it.text, conds) : '';
+    if (per) add(i, per);
+  });
   [...under.keys()].sort((a, b) => b - a).forEach(i =>
     items.splice(i + 1, 0, ...under.get(i).map(text => ({ kind: 'comment', text }))));
-  if (!whose && !scaled) return protSerialize(items);
-  const said = [whose, scaled
-    ? `quantities scaled ×${r2(k)} from the protocol as written` +
-      (+P.base > 0 ? ` (${r2(+P.base)} g)` : '')
-    : 'the protocol as written'].filter(Boolean).join(' — ') + '.';
+  if (!whose && !scaled && !moved && conds < 2) return protSerialize(items);
+  const names = ((P.pellets || []).map(x => String(x.c || '').trim()).filter(Boolean)).join(', ');
+  const how = [
+    scaled ? `quantities scaled ×${r2(k)} from the protocol as written` +
+             (+P.base > 0 ? ` (${r2(+P.base)} g)` : '') : '',
+    moved ? `the volumes counted in column volumes at ${r2(cv.mL)} mL of resin, ` +
+            `not the ${r2(cv.base)} mL the protocol is written for` : '',
+    conds > 1 ? `one of ${conds} conditions run side by side` +
+                (names ? ` (${names})` : '') + ', so every step below is per construct' : '',
+  ].filter(Boolean);
+  const said = [whose, how.length ? how.join('; ') : 'the protocol as written']
+    .filter(Boolean).join(' — ') + '.';
   const at = items.length && items[0].kind === 'title' ? 1 : 0;
   items.splice(at, 0, { kind: 'comment', text: said[0].toUpperCase() + said.slice(1) });
   return protSerialize(items);
@@ -7371,6 +8361,11 @@ function readSession(raw) {
  *  fits the page — reopening where you were beats reopening zoomed out. */
 function applySession(s, where) {
   const S = readSession(s);
+  // A session saved before it had a key on omnifig's board is known there by
+  // its file's name, so it is linked the same each time it is opened, saved or not.
+  if (S.doc && !S.doc.boardKey && where && where.name) {
+    S.doc.boardKey = where.name.replace(/\.purifig\.json$|\.json$/i, '');
+  }
   reset(S.doc);
   applyUi(S.ui);
   if (S.view && S.view.w > 0) { view = { ...S.view }; matchAspect(); }
@@ -7456,16 +8451,24 @@ async function saveSession(as) {
   if (!backend.ok) return saveDownload();
   let path = session.path;
   if (as || !path) {
-    const dir = await LK.browse({
-      mode: 'dir', exts: ['.json'],     // so the folder shows the sessions in it
+    // One dialog for the folder and the name together.  It used to ask for the
+    // folder and then call prompt() for the name, which returns null without
+    // asking anyone in an embedded browser -- "Save as" simply did nothing.
+    const picked = await LK.save({
+      ext: '.purifig.json', exts: ['.purifig.json', '.json'],
+      path: (session.path || '').replace(/\/[^/]*$/, ''),
+      name: session.name || defaultName() + '.purifig.json',
       title: as && session.path ? 'Save the session as…' : 'Where to keep this session',
       hint: 'The session file goes here. Scans you dropped on the canvas are copied ' +
             'into a folder beside it, so they cannot be lost to a temp cleanup.',
     });
-    if (!dir) return;
-    const name = prompt('File name:', (session.name || defaultName() + '.purifig.json'));
-    if (!name) return;
-    path = dir.replace(/\/+$/, '') + '/' + name.trim();
+    if (!picked) return;
+    path = picked;
+    // The dialog names the file it is about to replace, in red, beside the
+    // button: asking again in a confirm() would be a second question about
+    // something already answered -- and one that an embedded browser answers
+    // "no" to on its own.
+    return writeSession(path, true);
   }
   await writeSession(path, path === session.path);
 }
@@ -8049,9 +9052,52 @@ $('#recent').onchange = ev => {
 // what would land in the file.  Every export finishes the crop first.
 $('#expPdf').onclick = async () => { await endCrop(); await exportPdf(); };
 $('#expSvg').onclick = async () => { await endCrop(); exportSvg(); };
-// Open in omnifig's tab, Send to board hands the figure, as the SVG export
-// makes it, to omnifig's board (labkit's LK.board).
-LK.board($('#expSvg'), async () => { await endCrop(); return exportSvgString(); });
+// Send to board hands the board showing, as the SVG export makes it, to
+// omnifig's board (labkit's LK.board), linked: a change here redraws it there.
+// No key while a crop is being dragged, so no redraw sent then finishes it
+// under the hand; the render that ends the crop sends it.
+const sheetBoard = LK.board($('#expSvg'), async () => { await endCrop(); return exportSvgString(); },
+  { app: 'purifig', key: () => (mode === 'crop' ? null : doc.sheet + ' ' + doc.boardKey) });
+// Send panel to board: the one panel selected, by itself and under its own key,
+// so a figure laid out in omnifig can hold this blot or that plot live.  Each
+// panel sent once follows its changes like the sheet does.
+const panelBoards = {};
+const panelBoard = (id) => panelBoards[id] || (panelBoards[id] = LK.board(null, () => panelSvg(id),
+  { app: 'purifig', key: () => (mode === 'crop' || !node(id) ? null : id + ' ' + doc.boardKey) }));
+const onePanel = () => (sel.size === 1 ? node([...sel][0]) : null);
+const panelSend = LK.board(null, async () => {
+  if (!onePanel()) throw new Error('select the one panel to send first');
+  await endCrop();
+  return panelSvg(onePanel().id);
+}, { app: 'purifig', key: () => (onePanel() ? onePanel().id + ' ' + doc.boardKey : null) })
+  .place($('#expSvg').nextElementSibling);
+if (panelSend) {
+  panelSend.textContent = 'Send panel to board';
+  // LK.board puts its own words back after "Sent".
+  new MutationObserver(() => {
+    if (panelSend.textContent === 'Send to board') panelSend.textContent = 'Send panel to board';
+  }).observe(panelSend, { childList: true });
+}
+board = { changed() { sheetBoard.changed(); doc.nodes.forEach(n => panelBoard(n.id).changed()); } };
+
+/** One panel as an SVG of its own: the export with every other panel and the
+ *  connectors taken out, and the view cut to what the panel draws, labels
+ *  and all, as the canvas lays it out. */
+function panelSvg(id) {
+  const c = $('#canvas'), live = c.querySelector(`g[data-node="${id}"]`);
+  if (!live) return null;
+  const r = live.getBoundingClientRect(), m = c.getScreenCTM().inverse();
+  const a = new DOMPoint(r.left, r.top).matrixTransform(m);
+  const b = new DOMPoint(r.right, r.bottom).matrixTransform(m);
+  const svg = new DOMParser().parseFromString(exportSvgString(), 'image/svg+xml').documentElement;
+  svg.querySelectorAll(':scope > g[data-node]').forEach(g => { if (g.getAttribute('data-node') !== id) g.remove(); });
+  const edges = svg.querySelector('#le');
+  if (edges) edges.remove();
+  svg.setAttribute('viewBox', `${r3(a.x)} ${r3(a.y)} ${r3(b.x - a.x)} ${r3(b.y - a.y)}`);
+  svg.setAttribute('width', r3(b.x - a.x) + 'mm');
+  svg.setAttribute('height', r3(b.y - a.y) + 'mm');
+  return '<?xml version="1.0" encoding="UTF-8"?>\n' + new XMLSerializer().serializeToString(svg);
+}
 $('#expPng').onclick = async () => { await endCrop(); exportPng(+$('#dpi').value); };
 $('#expSource').onclick = async () => {
   await endCrop();
@@ -8078,7 +9124,7 @@ $('#example').onclick = () => {
   applySession({ format: SESSION_FORMAT, doc: exampleDoc() }, {});
 };
 
-window.addEventListener('resize', () => { canvasRect = null; matchAspect(); render(); });
+window.addEventListener('resize', () => { canvasRect = canvasCtm = null; matchAspect(); render(); });
 
 /* ================= example ================= */
 

@@ -997,6 +997,52 @@ def test_a_chemstation_injection_brings_in_every_channel():
         shutil.rmtree(tmp)
 
 
+def test_the_library_is_a_folder_of_protocols():
+    """Add, list, read back -- and the folder is all there is to it.
+
+    Word leaves `~$name.docx` beside every document it has open, and two of
+    them sit in the lab's own templates folder: a .docx that is not a protocol
+    and that `read_docx` cannot open.
+    """
+    import io
+    import shutil
+    import tempfile
+    tmp = tempfile.mkdtemp()
+    was = S.STATE_DIR
+    S.STATE_DIR = tmp
+    try:
+        c = S.app.test_client()
+        text = "# Ni-NTA binder prep\n\n## Day 1\n- Load onto 2 mL Ni-NTA\n"
+        r = c.post("/api/protocol/library/add",
+                   json={"name": "Ni-NTA binder prep", "text": text})
+        assert r.status_code == 200, r.get_data(as_text=True)
+        path = r.get_json()["path"]
+
+        # A name is a name: it cannot reach out of the folder, and the same one
+        # twice is kept beside the first rather than written over it.
+        esc = c.post("/api/protocol/library/add",
+                     json={"name": "../../escaped", "text": "# nope\n"}).get_json()
+        assert os.path.dirname(esc["path"]) == os.path.join(tmp, "protocols"), esc
+        again = c.post("/api/protocol/library/add",
+                       json={"name": "Ni-NTA binder prep", "text": "# other\n"}).get_json()
+        assert again["file"] == "Ni-NTA binder prep-2.md", again
+        assert io.open(path, encoding="utf-8").read() == text, "the first was written over"
+
+        # Word's lock file is not an entry.
+        lock = os.path.join(tmp, "protocols", "~$Ni-NTA binder prep.docx")
+        io.open(lock, "w", encoding="utf-8").write("not a protocol")
+        names = [e["name"] for e in c.get("/api/protocol/library").get_json()["entries"]]
+        assert names == ["escaped", "Ni-NTA binder prep", "Ni-NTA binder prep-2"], names
+
+        # And an entry reads back as the protocol it was.
+        got = c.post("/api/protocol/open", json={"path": path}).get_json()
+        assert got["text"] == text, got["text"]
+        assert got["title"] == "Ni-NTA binder prep", got["title"]
+    finally:
+        S.STATE_DIR = was
+        shutil.rmtree(tmp)
+
+
 def test_the_chemstation_reader_reads_its_own_fixture():
     """labkit's decoder, run where a failure shows up in this suite too."""
     from labkit import chemstation

@@ -87,8 +87,8 @@ BOX_LW = 0.7
 #: (``figsize=(0.25*18, 1.2)`` in ``ClC-7 2025.ipynb``, via
 #: ``working_stuff/Processing Scripts/voltage_clamp_processing.py``).  Set on
 #: the figures rather than derived.  ``PlotSpec.panel_height_mm`` is the step
-#: family's panel and keeps its own 38.1 -- a sweep of fourteen voltage steps
-#: is not a bar chart and does not read short.
+#: family's panel and keeps its own size -- a sweep of voltage steps is not a
+#: bar chart and is read by its shape, not against a value axis.
 #:
 #: ``PlotSpec.axes_height_mm``/``axes_width_mm`` override it.  The *category*
 #: axis is never pinned from here -- ``bar_mm`` sizes that one.
@@ -428,9 +428,12 @@ def annotate_p(
         Left ``None`` it is read back off the axes, which :func:`group_plot`
         marks -- so a caller that passes the table it always passed gets
         brackets the right way round without knowing about this argument.
-    ``gap``, ``tip``
-        Points from the data (or the edge) to the first bracket, and the
-        length of a bracket's ends.
+    ``gap``
+        Points from the data (or the edge) to the first bracket.  ``tip`` is
+        kept for old callers and ignored: the lines have no ends.
+
+    Against one control -- every comparison sharing a group -- there is no
+    bracket at all: each p stands over (turned, beside) the other group.
 
     Brackets are stacked: a bracket takes the lowest row of the ladder clear
     of every bracket it overlaps, so a three-group figure with all three pairs
@@ -514,6 +517,24 @@ def annotate_p(
     if not placeable:
         return []
 
+    # Against one control -- every comparison shares one group, as "vs WT"
+    # does -- each p goes over the other group on its own, with no line: the
+    # control is said once, by the figure.  Otherwise a plain line between
+    # the two groups, without ends.  Either way nothing hangs down to cross
+    # the data.
+    tip = 0.0
+    shared = set.intersection(*({e["a"], e["b"]} for e in placeable))
+    control = next(iter(shared)) if len(shared) == 1 else None
+    if control is not None:
+        spots = sorted(set(float(v) for v in positions.values()))
+        half = 0.4 * (min(np.diff(spots)) if len(spots) > 1 else 1.0)
+        for entry in placeable:
+            other = entry["b"] if entry["a"] == control else entry["a"]
+            at = _span_of(ax, other, positions)
+            # Half a category either side, so the label clears the jittered
+            # points of its group, not just the middle of it.
+            entry["x1"], entry["x2"] = at - half, at + half
+
     # Short spans first: an adjacent pair should end up underneath the pair
     # that reaches across the whole axis, not the other way round.
     placeable.sort(key=lambda e: (e["x2"] - e["x1"], e["x1"]))
@@ -525,6 +546,11 @@ def annotate_p(
     lift, pad = 0.8, 1.0
     line = text_to_path.get_text_width_height_descent(
         "lp", FontProperties(size=fontsize), False)[1]
+    if control is not None and horizontal:
+        # Labels beside their groups read across, so a row is as deep as the
+        # longest of them is long.
+        line = max(text_to_path.get_text_width_height_descent(
+            e["text"] or "", FontProperties(size=fontsize), False)[0] for e in placeable)
     step = tip + lift + line + pad
 
     # Every ceiling is measured before the first bracket exists.  Measuring as
@@ -574,19 +600,20 @@ def annotate_p(
         # Drawn in its frame from the start: plotted in data units, the
         # points would be taken for data and stretch the autoscaled limit.
         frame = _frame(1.0, ax.transAxes) if outside else _frame(base, ax.transData)
-        mark = ax.plot(
+        mark = [] if control is not None else ax.plot(
             *_pair([entry["x1"], entry["x1"], entry["x2"], entry["x2"]],
                    [bar - tip, bar, bar, bar - tip]),
             transform=frame, clip_on=False, zorder=10,
             lw=linewidth, color=line_colour, solid_capstyle="butt",
         )
         if entry["text"]:
-            # Turned, the label runs along its bracket.  Across it, a row
-            # would have to be as deep as the label is long.
+            # Turned, the label runs along its line.  Across it, a row would
+            # have to be as deep as the label is long -- which a label with
+            # no line, beside its own group, is.
             mark.append(ax.text(
                 *_pair((entry["x1"] + entry["x2"]) / 2.0, bar + lift), entry["text"],
                 transform=frame, clip_on=False, zorder=10,
-                rotation=90 if horizontal else 0,
+                rotation=90 if horizontal and control is None else 0,
                 ha="left" if horizontal else "center",
                 va="center" if horizontal else "bottom", color=line_colour,
                 fontsize=fontsize * (0.92 if faded else 1.0),
@@ -981,7 +1008,8 @@ def xy_plot(
     plot and the reversal potential is read off it.
 
     Each entry of ``groups`` is ``{'label', 'x', 'mean', 'sem'}`` and may carry
-    ``'n'``.  ``error`` is ``'band'``, ``'bars'``, ``'both'`` or ``'none'``.
+    ``'n'``, and its own ``'marker'`` (``''`` for none) and ``'join'``, which
+    win over the cycles: data as points with its fit as a line.  ``error`` is ``'band'``, ``'bars'``, ``'both'`` or ``'none'``.
     ``markers`` and ``line_styles`` are cycled across the curves, so groups
     stay apart in a figure printed in gray.
     """
@@ -1005,21 +1033,27 @@ def xy_plot(
         if n_max:
             label = f"{label} (n={n_max})"
 
-        if error in ("band", "both"):
-            band = np.where(np.isfinite(sem), sem, 0.0)
+        shape = entry.get("marker", shapes[i % len(shapes)] if shapes else "")
+        joined = entry.get("join", join)
+
+        band = np.where(np.isfinite(sem), sem, 0.0)
+        # No spread given is no band, rather than one of no width -- or a cap
+        # drawn on every point of a curve that has no error to show.
+        spread = band[good].any()
+        if spread and error in ("band", "both"):
             ax.fill_between(x[good], (mean - band)[good], (mean + band)[good],
                             color=colour, alpha=0.18, linewidth=0, zorder=2)
-        if error in ("bars", "both"):
-            ax.errorbar(x[good], mean[good], yerr=np.where(np.isfinite(sem), sem, 0.0)[good],
+        if spread and error in ("bars", "both"):
+            ax.errorbar(x[good], mean[good], yerr=band[good],
                         fmt="none", ecolor=colour, elinewidth=0.7, capsize=1.6,
                         capthick=0.7, zorder=3)
-        if join:
+        if joined:
             ax.plot(x[good], mean[good], dashes[i % len(dashes)], color=colour,
                     lw=line_width, label=label, zorder=4)
-        if shapes:
-            ax.plot(x[good], mean[good], shapes[i % len(shapes)], ms=marker_size, color=colour,
+        if shape:
+            ax.plot(x[good], mean[good], shape, ms=marker_size, color=colour,
                     mfc=colour, mew=0, zorder=5, ls="none",
-                    label=None if join else label)
+                    label=None if joined else label)
 
     if zero_lines:
         low, high = ax.get_ylim()
@@ -1081,10 +1115,11 @@ def trace_plot(
         if not good.any():
             continue
         spread = np.where(np.isfinite(sem), sem, 0.0)
-        if band and error in ("band", "both"):
+        shown = band and spread[good].any()      # none given: no band of no width
+        if shown and error in ("band", "both"):
             ax.fill_between(x[good], (mean - spread)[good], (mean + spread)[good],
                             color=colour, alpha=0.16, linewidth=0, zorder=2)
-        if band and error in ("bars", "both"):
+        if shown and error in ("bars", "both"):
             # A bar per sample would be a smear; a handful along the trace is
             # readable and says the same thing.
             step = max(1, int(good.sum() // 12))
@@ -1173,6 +1208,131 @@ def _family_colours(panels: Sequence[dict], spec: "PlotSpec") -> list[list]:
     return [[colour_of[value_of(panel)]] * len(panel["sweeps"]) for panel in panels]
 
 
+#: Gaps between the panels of a step family, in mm.  Panels that differ only
+#: in their last key -- one construct at 0 and 3 min -- are a matched pair and
+#: sit almost touching; a new construct gets a gap that says so.
+FAMILY_GAP_IN_MM = 0.8
+FAMILY_GAP_OUT_MM = 2.5
+FAMILY_ROW_GAP_MM = 1.0
+
+
+def _active_window(panels: Sequence[dict], pad: float = 0.04) -> tuple[float, float] | None:
+    """The stretch of the sweep where something happens, in ms.
+
+    The holding before the first step and after the tail has relaxed is the
+    same flat line in every sweep: on a published family it is most of the
+    width and says nothing.  Kept is where the sweeps differ from each other
+    -- or, for a panel of one sweep, from its own start -- by more than 3 % of
+    the largest such difference in the figure, plus a little either side so
+    the step can be seen to start from somewhere.  One window for every
+    panel, since they share a time axis.  None when nothing stands out.
+    """
+    found = []
+    for panel in panels:
+        time = np.asarray(panel["time_ms"], float)
+        means = [np.asarray(s["mean"], float)[:time.size] for s in panel["sweeps"]]
+        means = [m for m in means if m.size == time.size]
+        if not means or time.size < 3:
+            continue
+        stack = np.vstack(means)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            if len(means) > 1:
+                signal = np.nanmax(stack, 0) - np.nanmin(stack, 0)
+            else:
+                signal = np.abs(stack[0] - np.nanmedian(stack[0][:max(3, time.size // 50)]))
+        found.append((time, np.nan_to_num(signal)))
+    if not found:
+        return None
+    top = max(float(np.percentile(signal, 99.5)) for _, signal in found)
+    if not np.isfinite(top) or top <= 0:
+        return None
+    low, high = np.inf, -np.inf
+    for time, signal in found:
+        on = np.flatnonzero(signal > 0.03 * top)
+        if on.size:
+            low, high = min(low, time[on[0]]), max(high, time[on[-1]])
+    if not high > low:
+        return None
+    first = min(float(np.nanmin(t)) for t, _ in found)
+    last = max(float(np.nanmax(t)) for t, _ in found)
+    margin = pad * (high - low)
+    return max(low - margin, first), min(high + margin, last)
+
+
+def _family_groups(panels: Sequence[dict]) -> list[list[int]]:
+    """Runs of panels that share every key but the last: matched pairs."""
+    groups: list[list[int]] = []
+    last = object()
+    for index, panel in enumerate(panels):
+        keys = list((panel.get("keys") or {}).values())
+        outer = tuple(keys[:-1]) if len(keys) > 1 else (index,)
+        if groups and outer == last:
+            groups[-1].append(index)
+        else:
+            groups.append([index])
+        last = outer
+    return groups
+
+
+def _family_canvas(panels: Sequence[dict], spec: "PlotSpec", cols: int, name_lines: int,
+                   group_titles: Sequence[str] | None = None):
+    """Axes placed in mm: a matched pair close, the next group a gap away.
+
+    Rows are filled group by group, and a group that does not fit on what is
+    left of a row starts the next one rather than being split -- unless it is
+    wider than a row on its own.  ``group_titles``, one per group, are set
+    once over the whole group, above the panels' own titles -- ``name_lines``
+    of them at the figure's size over the n at ``spec.n_pt``.  No layout
+    engine: every position is known, so nothing moves at save time.  Returns
+    ``(fig, axes, places)`` with each panel's (row, column).
+    """
+    line_mm = spec.font_pt * 1.2 / 72 * 25.4
+    n_mm = spec.n_pt * 1.2 / 72 * 25.4
+    title_mm = name_lines * line_mm + n_mm + 0.8
+    width = spec.axes_width_mm if spec.axes_width_mm > 0 else max(spec.panel_width_mm, 8.0)
+    # The panel size is the traces' own: a title that wraps adds above them
+    # rather than squeezing them.
+    height = spec.axes_height_mm if spec.axes_height_mm > 0 else max(spec.panel_height_mm, 8.0)
+    rows: list[list[tuple[int, float]]] = [[]]     # (panel, left edge in mm)
+    group_of: dict[int, int] = {}
+    used = 0
+    for g, group in enumerate(_family_groups(panels)):
+        group_of.update((index, g) for index in group)
+        if rows[-1] and used + len(group) > cols:
+            rows.append([])
+            used = 0
+        for k, index in enumerate(group):
+            if rows[-1] and used >= cols:
+                rows.append([])
+                used = 0
+            row = rows[-1]
+            left = 0.0 if not row else row[-1][1] + width + (
+                FAMILY_GAP_IN_MM if k else FAMILY_GAP_OUT_MM)
+            row.append((index, left))
+            used += 1
+    fig_w = max(row[-1][1] + width for row in rows if row)
+    fig_h = len(rows) * (title_mm + height) + (len(rows) - 1) * FAMILY_ROW_GAP_MM
+    fig = plt.figure(figsize=(fig_w * MM, fig_h * MM))
+    axes, places = [None] * len(panels), [None] * len(panels)
+    for r, row in enumerate(rows):
+        bottom = fig_h - r * (title_mm + height + FAMILY_ROW_GAP_MM) - title_mm - height
+        for c, (index, left) in enumerate(row):
+            axes[index] = fig.add_axes((left / fig_w, bottom / fig_h, width / fig_w, height / fig_h))
+            places[index] = (r, c)
+        if group_titles:
+            spans: dict[int, list[float]] = {}
+            for index, left in row:
+                span = spans.setdefault(group_of[index], [left, left + width])
+                span[1] = left + width
+            # Over the panel titles, which take the lines below it.
+            top = bottom + height + 0.7 + n_mm + (name_lines - 1) * line_mm
+            for g, (left, right) in spans.items():
+                fig.text((left + right) / 2 / fig_w, top / fig_h, group_titles[g],
+                         ha="center", va="bottom", fontsize=spec.font_pt)
+    return fig, axes, places
+
+
 def family_plot(panels: Sequence[dict], spec: "PlotSpec", unit: str = "pA/pF"):
     """Averaged step families, one panel per group, every step overlaid.
 
@@ -1182,20 +1342,45 @@ def family_plot(panels: Sequence[dict], spec: "PlotSpec", unit: str = "pA/pF"):
     currents can be compared by eye, which is also why the scale bar is drawn
     once, on the first. Returns ``(fig, axes)``.
 
+    Drawn for print, so as compact as it reads: the holding either side of
+    the protocol is cut (:func:`_active_window`) unless ``spec.xlim`` says
+    otherwise, each title puts its n on a line of its own, and with scale bars
+    -- the lab's convention -- panels of a matched pair nearly touch while
+    the next construct sits a gap away (:func:`_family_canvas`).
+
     The publication style is applied here, so a caller neither needs to wrap
     this nor should: the axes size is settled after the style block exits,
     where the saving happens, and a block around this call would put the
     two back on opposite sides of it.
     """
+    scale_bars = spec.spines in ("auto", "none")
     with publication_style(font_pt=spec.font_pt, font=spec.font):
         rows, cols = _panel_grid(len(panels), spec.panel_cols)
-        width_in = max(spec.panel_width_mm, 8.0) * MM * cols
-        height_in = max(spec.panel_height_mm, 8.0) * MM * rows
-        fig, grid = plt.subplots(rows, cols, figsize=(width_in, height_in), squeeze=False,
-                                 layout="constrained")
-        axes = list(grid.ravel())
+        # A matched pair says its construct once, over both panels, and each
+        # panel only what differs -- "0 min" over "n = 6" -- so the panels can be
+        # as narrow as their traces.
+        groups = _family_groups(panels)
+        paired = scale_bars and any(len(g) > 1 for g in groups)
+        heads = None
+        names = [panel["label"] for panel in panels]
+        if paired:
+            keys = [list((panel.get("keys") or {}).values()) for panel in panels]
+            heads = [", ".join(str(v) for v in keys[g[0]][:-1]) for g in groups]
+            names = [str(k[-1]) if k else panel["label"] for k, panel in zip(keys, panels)]
+        # The n on a line of its own, smaller: a name and its n side by side
+        # are wider than a 20 mm panel and run into the next title.
+        if scale_bars:
+            fig, axes, places = _family_canvas(panels, spec, cols, 1 + bool(paired), heads)
+        else:
+            width_in = max(spec.panel_width_mm, 8.0) * MM * cols
+            height_in = max(spec.panel_height_mm, 8.0) * MM * rows
+            fig, grid = plt.subplots(rows, cols, figsize=(width_in, height_in), squeeze=False,
+                                     layout="constrained")
+            fig.get_layout_engine().set(w_pad=1 / 72, h_pad=1 / 72, wspace=0, hspace=0)
+            axes = list(grid.ravel())
+            places = [divmod(i, cols) for i in range(len(axes))]
 
-        x_limits = _limits(spec.xlim)
+        x_limits = _limits(spec.xlim) or _active_window(panels)
         y_limits = _limits(spec.ylim)
         if y_limits is None:
             lows, highs = [], []
@@ -1216,7 +1401,6 @@ def family_plot(panels: Sequence[dict], spec: "PlotSpec", unit: str = "pA/pF"):
                 pad = 0.06 * (high - low or 1.0)
                 y_limits = (low - pad, high + pad)
 
-        scale_bars = spec.spines in ("auto", "none")
         per_panel = _family_colours(panels, spec)
         for index, (ax, panel) in enumerate(zip(axes, panels)):
             time = np.asarray(panel["time_ms"], float)
@@ -1224,6 +1408,8 @@ def family_plot(panels: Sequence[dict], spec: "PlotSpec", unit: str = "pA/pF"):
             for colour, sweep in zip(colours, panel["sweeps"]):
                 mean = np.asarray(sweep["mean"], float)
                 good = np.isfinite(mean) & np.isfinite(time)
+                if x_limits:
+                    good &= (time >= x_limits[0]) & (time <= x_limits[1])
                 if spec.family_spread:
                     sem = np.nan_to_num(np.asarray(sweep.get("sem", np.zeros_like(mean)), float))
                     ax.fill_between(time[good], (mean - sem)[good], (mean + sem)[good],
@@ -1235,7 +1421,11 @@ def family_plot(panels: Sequence[dict], spec: "PlotSpec", unit: str = "pA/pF"):
                 ax.set_ylim(*y_limits)
             low, high = ax.get_xlim()
             ax.hlines(0, low, high, linestyles=(0, (1, 2)), lw=0.6, color=theme.PRINT["ink"])
-            ax.set_title(f"{panel['label']},\nn = {panel['n']}", fontsize=spec.font_pt, pad=2)
+            # Both on baselines: the n 2 pt over the traces, the name a line over it.
+            ax.set_title(names[index], fontsize=spec.font_pt, pad=2 + spec.n_pt * 1.2)
+            ax.annotate(f"n = {panel['n']}", (0.5, 1), xycoords="axes fraction", xytext=(0, 2),
+                        textcoords="offset points", ha="center", va="baseline",
+                        fontsize=spec.n_pt)
             if scale_bars:
                 # The lab's convention: no axes, and one scale bar for the lot,
                 # which the shared y range makes true of every panel.
@@ -1245,7 +1435,7 @@ def family_plot(panels: Sequence[dict], spec: "PlotSpec", unit: str = "pA/pF"):
                                    x_unit="s", y_unit=unit, x_scale=1000.0,
                                    fontsize=spec.font_pt * 0.9)
             else:
-                row, col = divmod(index, cols)
+                row, col = places[index]
                 for side in ("top", "right"):
                     ax.spines[side].set_visible(spec.spines == "box")
                 if row < rows - 1 and index + cols < len(panels):
@@ -1258,15 +1448,18 @@ def family_plot(panels: Sequence[dict], spec: "PlotSpec", unit: str = "pA/pF"):
                     ax.set_ylabel(spec.ylabel or unit)
         for ax in axes[len(panels):]:
             ax.set_axis_off()
-    # Outside the style block on purpose.  Constrained layout settles the
-    # axes box at draw time and reads the tick label size from the rcParams
-    # in force *then*, so a figure fitted under the publication style and
-    # saved under the caller's comes out a couple of percent off the size it
-    # was asked for -- silently, because fit_axes never measures again after
-    # its last resize.  Fit where the saving happens and the number lands.
-    fit_axes(fig, spec.axes_width_mm, spec.axes_height_mm)
-    if spec.axes_width_mm > 0 or spec.axes_height_mm > 0:
-        hold_layout(fig)
+    if not scale_bars:
+        # Outside the style block on purpose.  Constrained layout settles the
+        # axes box at draw time and reads the tick label size from the
+        # rcParams in force *then*, so a figure fitted under the publication
+        # style and saved under the caller's comes out a couple of percent
+        # off the size it was asked for -- silently, because fit_axes never
+        # measures again after its last resize.  Fit where the saving happens
+        # and the number lands.  (The scale-bar canvas is placed in mm and
+        # has nothing to fit.)
+        fit_axes(fig, spec.axes_width_mm, spec.axes_height_mm)
+        if spec.axes_width_mm > 0 or spec.axes_height_mm > 0:
+            hold_layout(fig)
     return fig, axes
 
 
@@ -1501,14 +1694,23 @@ class PlotSpec:
     point_size: float = 2.5
 
     # --- step families (one panel per group) ------------------------------
-    #: Size of each panel, in mm; the figure is as many of them as there are.
-    panel_width_mm: float = 25.4
-    panel_height_mm: float = 38.1      # 1 x 1.5 in, matching PANEL_HEIGHT_IN
+    #: Size of each panel's traces, in mm; the figure is as many of them as
+    #: there are, plus their titles.  20 mm is a family at print size.
+    panel_width_mm: float = 20.0
+    panel_height_mm: float = 20.0
     #: Panels per row; 0 lays them out as near a square as the count allows.
     panel_cols: int = 0
     #: Scale bar lengths: seconds, and the current unit. 0 picks round ones.
     scale_x_s: float = 0.0
     scale_y: float = 0.0
+    #: Size of the n under each panel's title, in pt.
+    n_pt: float = 7.0
+    #: A trace's scale bars are in its own data's units, which these name:
+    #: ``scale_x`` is the time bar in ``x_unit`` and ``scale_y`` the value bar
+    #: in ``y_unit``.  0 picks round ones, as for a family.
+    scale_x: float = 0.0
+    x_unit: str = "ms"
+    y_unit: str = "pA/pF"
     #: Shade each step's SEM. Off by default: fourteen overlapping bands hide
     #: the currents they describe.
     family_spread: bool = False
@@ -1578,6 +1780,8 @@ class PlotSpec:
             if isinstance(spec.colours, dict) else {}
         if spec.points in ("none", "false", "False"):
             spec.points = ""
+        if not spec.n_pt > 0:
+            spec.n_pt = cls.n_pt
         return spec
 
 
@@ -1991,6 +2195,8 @@ def figure_from_spec(
                        line_width=spec.line_width,
                        line_styles=_cycle(spec.line_styles, "-"),
                        scale_bars=spec.spines in ("auto", "none"),
+                       x_length=spec.scale_x or None, y_length=spec.scale_y or None,
+                       x_unit=spec.x_unit, y_unit=spec.y_unit,
                        xlabel=spec.xlabel, ylabel=spec.ylabel)
         else:
             ax, positions = group_plot(

@@ -85,6 +85,33 @@ function cleanSeq(raw) {
   return { seq: seq.join(''), odd };
 }
 
+/** The chains a paste describes, with how many copies of each.
+ *
+ *  A complex is pasted the way it is written down: one FASTA record per chain,
+ *  the stoichiometry on its header -- `>LRRC8A x4`, `×4`, `(4)`, `4 copies`.
+ *  One record, or none at all, is one chain of one copy, which is every
+ *  sequence that was ever pasted here before complexes existed.
+ */
+function parseChains(raw) {
+  const recs = [];
+  String(raw || '').split(/\r?\n/).forEach(line => {
+    const head = /^\s*[>;]/.test(line);
+    if (head || !recs.length) {
+      recs.push({ head: head ? line.replace(/^\s*[>;]\s*/, '') : '', body: [] });
+    }
+    if (!head) recs[recs.length - 1].body.push(line);
+  });
+  return recs.map(r => {
+    const m = r.head.match(/(?:^|\s)[x×*]\s*(\d+)(?!\d)|(\d+)\s*[x×*](?:\s|$)|\((\d+)\)|\b(\d+)\s*(?:copies|subunits)\b/i);
+    const copies = m ? +(m[1] || m[2] || m[3] || m[4]) : 1;
+    return {
+      name: (m ? r.head.replace(m[0], ' ') : r.head).replace(/\s+/g, ' ').trim().slice(0, 40),
+      n: copies > 0 ? copies : 1,
+      seq: cleanSeq(r.body.join('\n')).seq,
+    };
+  }).filter(c => c.seq);
+}
+
 /** Net charge at a given pH, from the Bjellqvist model. */
 function netCharge(counts, pH, nTerm, cTerm) {
   let q = 1 / (1 + Math.pow(10, pH - (PK_NTERM[nTerm] ?? 7.5)));
@@ -154,18 +181,71 @@ function protParam(raw) {
  *  someone who measured their own extinction coefficient knows something the
  *  sequence does not. */
 function proteinConstants(p) {
+  const subs = p && Array.isArray(p.chains) && p.chains.length ? p.chains : null;
+  if (subs) return complexConstants(p, subs);
   const pp = p && p.seq ? protParam(p.seq) : null;
   const cys = (p && p.cys) === 'cystine';
   const mw = nn(p && p.mw) ?? (pp ? pp.mw : null);
-  const eps = nn(p && p.eps) ?? (pp ? (cys ? pp.epsCys : pp.epsRed) : null);
+  let eps = nn(p && p.eps) ?? (pp ? (cys ? pp.epsCys : pp.epsRed) : null);
   let a01 = nn(p && p.a01);
   if (a01 === null && eps !== null && mw) a01 = eps / mw;
+  // And the other way round, because ε = A 0.1% × M: a chain given only the
+  // coefficient somebody measured still adds up inside a complex.
+  if (eps === null && a01 !== null && mw) eps = a01 * mw;
   return {
     pp, mw, eps, a01, pI: pp ? pp.pI : null,
     from: (p && (nn(p.a01) !== null || nn(p.eps) !== null || nn(p.mw) !== null))
       ? 'entered' : pp ? 'sequence' : 'none',
   };
 }
+
+/** What a complex of several chains absorbs and weighs.
+ *
+ *  Beer-Lambert is additive in chromophores and mass is additive in atoms, so
+ *  both are sums over the copies: ε = Σ nᵢ·εᵢ, M = Σ nᵢ·Mᵢ.  A 0.1% is ε/M as
+ *  ever, which makes it the *mass-weighted average* of the chains' -- so a
+ *  homo-oligomer has exactly its own monomer's A 0.1% and only its µM changes,
+ *  while a hetero-complex has neither chain's.
+ *
+ *  Nothing else is a sum.  A pI, a GRAVY and an instability index belong to a
+ *  chain, so `pp` is null for a complex and the panel reports the chains
+ *  themselves rather than inventing a number for the whole.  A chain whose ε
+ *  is unknown leaves the complex's unknown too: a coefficient missing one
+ *  subunit is not a coefficient, it is a smaller protein's.
+ *
+ *  Two things it does not know about.  An inter-chain disulfide is a cystine
+ *  no single chain can see (+125 M⁻¹cm⁻¹, under half a percent of a typical ε
+ *  -- type ε over it if it matters), and a chromophore that is not protein --
+ *  a bound nucleotide, a heme, a detergent with a ring in it -- absorbs at 280
+ *  without being in any sequence.
+ */
+function complexConstants(p, subs) {
+  const parts = subs.map(c => {
+    const k = proteinConstants({ cys: p.cys, ...c, chains: null });
+    return { name: c.name || '', copies: Math.max(1, Math.round(nn(c.n) ?? 1)), k, pp: k.pp };
+  });
+  const sum = key => parts.reduce(
+    (a, x) => (a === null || nn(x.k[key]) === null) ? null : a + x.copies * x.k[key], 0);
+  const mw = nn(p.mw) ?? sum('mw');
+  const eps = nn(p.eps) ?? sum('eps');
+  let a01 = nn(p.a01);
+  if (a01 === null && eps !== null && mw) a01 = eps / mw;
+  const froms = parts.map(x => x.k.from);
+  return {
+    pp: null, parts, mw, eps, a01, pI: null,
+    copies: parts.reduce((a, x) => a + x.copies, 0),
+    aa: parts.every(x => x.pp) ? parts.reduce((a, x) => a + x.copies * x.pp.n, 0) : null,
+    from: (nn(p.a01) !== null || nn(p.eps) !== null || nn(p.mw) !== null) ? 'entered'
+          : froms.every(f => f === 'sequence') ? 'sequence'
+          : froms.some(f => f === 'none') ? 'none' : 'entered',
+  };
+}
+
+/** `LRRC8A ×4 + LRRC8C ×2` — a complex in the words a methods paragraph, a
+ *  table headline and an audit trail all need, so none of them invents its
+ *  own. */
+const protStoich = k => (k.parts || [])
+  .map(x => `${x.name || 'a chain'}${x.copies > 1 ? ` ×${x.copies}` : ''}`).join(' + ');
 
 /** mg/mL and µM for one reading.  A280 is what was measured; everything else is
  *  arithmetic on it, so it is derived here and never stored. */

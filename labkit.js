@@ -11,9 +11,10 @@
  *   LK.hexBox(colorInput)             the well's hex code, typed or pasted
  *   LK.PlotControls(host, {...})      the plotting panel, in all of them
  *   LK.plateEditor(host, {...})       a plate map: which wells got what
+ *   LK.swapWells(labels, a, b)        move a well's contents, or swap two
  *   LK.api(url, opts)                 fetch that throws the server's message
  *   LK.nameMatch(query)              a filter box, as a predicate over a name
- *   LK.board(exportButton, makeSvg)   Send to board, in the figure editor's tab
+ *   LK.board(exportButton, makeSvg, {key})   Send to board, linked, from anywhere
  */
 (function (global) {
   'use strict';
@@ -144,6 +145,16 @@
 
   // --------------------------------------------------------------- fetch ---
 
+  /** What a dead server says.  A getter, because the title is set per page. */
+  Object.defineProperty(LK, 'OFFLINE', {
+    get() {
+      const app = (document.title || 'This app').split(/\s+[-–—]\s+/)[0];
+      return app + ' is not answering. Its server runs in a terminal -- if that '
+        + 'window was closed, start it again and reload this page. Nothing on '
+        + 'this page has been lost.';
+    },
+  });
+
   /** fetch that surfaces the server's own error text instead of "500". */
   LK.api = async function (url, options) {
     const opts = Object.assign({ headers: {} }, options || {});
@@ -152,7 +163,18 @@
       opts.headers['Content-Type'] = 'application/json';
       opts.method = opts.method || 'POST';
     }
-    const response = await fetch(url, opts);
+    /* A dead server is the one failure every one of these apps hits, because
+       every one of them is started by hand from a terminal that later gets
+       closed.  `fetch` rejects with a bare `TypeError: Failed to fetch`, and
+       since each caller shows `e.message`, that browser internal was the entire
+       message the user got -- next to a page still drawing its last good state,
+       which reads as "the data is broken", not "the server is gone". */
+    let response;
+    try {
+      response = await fetch(url, opts);
+    } catch (e) {
+      throw new Error(LK.OFFLINE);
+    }
     const text = await response.text();
     let payload;
     try { payload = text ? JSON.parse(text) : {}; } catch (e) { payload = { error: text }; }
@@ -208,6 +230,15 @@
   }
   LK.recentFolders = recents;
 
+  /* Which folder a dialog opens in: what the caller asked for, else the folder
+     last used, else home (an empty path).  `avoid` is removed from both. */
+  function startFolder(path, avoid, useRecent) {
+    const want = avoid && path === avoid ? '' : path;
+    if (want || !useRecent) return want || '';
+    return recents().find((p) => p && p !== avoid) || '';
+  }
+  LK.startFolder = startFolder;
+
   function humanSize(bytes) {
     if (!bytes) return '';
     if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + ' MB';
@@ -217,8 +248,10 @@
   /**
    * The file dialog, identical in every app.
    *
-   *   mode      'dir' | 'file' | 'files'
+   *   mode      'dir' | 'file' | 'files' | 'save'
    *   exts      ['.czi', '.tif']  -- which files are worth showing
+   *   ext       in 'save' mode, appended to a typed name that has none
+   *   name      in 'save' mode, the name to start with
    *   path      where to open
    *   endpoint  defaults to '/api/browse'
    *   title, hint
@@ -232,10 +265,27 @@
    */
   LK.browse = function (options) {
     const opts = Object.assign({
-      mode: 'dir', exts: null, path: '', endpoint: '/api/browse',
-      title: '', hint: '', startAtRecent: true,
+      mode: 'dir', exts: null, ext: '', name: '', path: '',
+      endpoint: '/api/browse', title: '', hint: '', startAtRecent: true, avoid: '',
     }, options || {});
-    if (!opts.path && opts.startAtRecent) opts.path = recents()[0] || '';
+    /* `avoid` is a folder this dialog must not OPEN in, though you can still
+       navigate there.  It exists for an app's own hidden store: Open is pointed
+       at it on purpose, so sessions saved before the file dialog stay reachable,
+       but the folder the user was sent to then becomes the newest recent one and
+       the next Save would land straight back in it -- refilling the folder the
+       dialog exists to empty.  Both routes in, the caller's path and the recent
+       list, are closed here rather than in each app.
+       ponytail: exact string match, so a store reached by a symlinked path
+       (~/.vesicle_detector for ~/.pherret) is not recognised.  Resolving the
+       app's own path is NOT the fix -- the other side comes from the listing,
+       which returns paths unresolved, so canonicalising one side alone makes
+       the comparison never match.  Closing it means resolving every path the
+       listing returns, which changes what the path box reads wherever a link
+       is involved (/tmp as /private/tmp) and what a picked folder is stored
+       as.  Reaching the store through the link takes typing it or showing
+       hidden files, and the cost is a dialog that opens in the old folder with
+       its name in plain sight -- nothing is lost.  Left as is deliberately. */
+    opts.path = startFolder(opts.path, opts.avoid, opts.startAtRecent);
 
     return new Promise((resolve) => {
       let here = { path: opts.path, dirs: [], files: [] };
@@ -255,9 +305,24 @@
       const footNote = el('div', { class: 'dim', style: { flex: '1 1 auto', fontSize: '11.5px' } });
       const useButton = el('button', {
         class: 'primary',
-        text: opts.mode === 'dir' ? 'Use this folder' : 'Open',
+        text: opts.mode === 'dir' ? 'Use this folder' : opts.mode === 'save' ? 'Save' : 'Open',
         onclick: () => finish(),
       });
+
+      /* Saving needs a name as well as a folder, and the name belongs in the
+         dialog that shows what is already in that folder -- a name field in a
+         side panel is how a file silently lands on top of another one. */
+      const saveExt = opts.ext || (opts.exts && opts.exts[0]) || '';
+      const nameBox = opts.mode !== 'save' ? null : el('input', {
+        type: 'text', class: 'lk-savename', spellcheck: 'false',
+        placeholder: 'file name', value: LK.withExt(opts.name || '', saveExt),
+        oninput: () => footer(),
+        onkeydown: (e) => { if (e.key === 'Enter') finish(); },
+      });
+
+      function named() {
+        return LK.withExt((nameBox && nameBox.value) || '', saveExt);
+      }
 
       const filter = el('input', {
         type: 'search', placeholder: 'filter…', title: LK.FILTER_HINT,
@@ -281,7 +346,8 @@
       const recentRow = el('div', { class: 'lk-recents' });
       const box = el('div', { class: 'modal-box' }, [
         el('div', { class: 'modal-head' }, [
-          el('h2', { text: opts.title || (opts.mode === 'dir' ? 'Choose a folder' : 'Choose a file') }),
+          el('h2', { text: opts.title || (opts.mode === 'dir' ? 'Choose a folder'
+            : opts.mode === 'save' ? 'Save as' : 'Choose a file') }),
           el('span', { class: 'spacer' }),
           el('button', { class: 'ghost small', text: 'Cancel', onclick: () => close(null) }),
         ]),
@@ -300,6 +366,7 @@
         ]),
         el('div', { class: 'modal-foot' }, [
           opts.mode === 'files' ? selectAllLabel : null,
+          nameBox,
           footNote,
           useButton,
         ]),
@@ -315,6 +382,12 @@
       document.addEventListener('keydown', onKey);
 
       function finish() {
+        if (opts.mode === 'save') {
+          const name = named();
+          if (!name || !here.path) return;
+          remember(here.path);
+          return close(here.path.replace(/\/+$/, '') + '/' + name);
+        }
         if (opts.mode === 'dir') {
           const target = chosenDir || here.path;
           remember(target);
@@ -472,9 +545,15 @@
         files.forEach((file, index) => {
           const row = el('div', {
             class: 'lk-entry' + (chosenFiles.has(file.path) ? ' sel' : ''),
-            ondblclick: () => { if (opts.mode !== 'dir') { chosenFiles.add(file.path); finish(); } },
+            ondblclick: () => {
+              if (opts.mode === 'save') { nameBox.value = file.name; return finish(); }
+              if (opts.mode !== 'dir') { chosenFiles.add(file.path); finish(); }
+            },
             onclick: (e) => {
               if (opts.mode === 'dir') return;
+              // Writing over a file on purpose: clicking it fills in its name,
+              // and the footer then says it will be replaced.
+              if (opts.mode === 'save') { nameBox.value = file.name; return footer(); }
               if (e.shiftKey && opts.mode === 'files' && lastIndex != null) {
                 const from = Math.min(lastIndex, index), to = Math.max(lastIndex, index);
                 for (let i = from; i <= to; i++) chosenFiles.add(files[i].path);
@@ -514,6 +593,14 @@
           footNote.style.color = '';
           footNote.textContent = target + (n ? '  ·  ' + n + ' file(s)' : '');
           useButton.disabled = false;
+        } else if (opts.mode === 'save') {
+          const name = named();
+          const taken = name && (here.files || []).some((f) => f.name === name);
+          footNote.style.color = taken ? 'var(--bad)' : '';
+          footNote.textContent = !name ? (opts.hint || 'Give the file a name')
+            : taken ? name + ' is already in this folder \u2014 saving replaces it'
+            : here.path + '/' + name;
+          useButton.disabled = !name;
         } else {
           footNote.style.color = '';
           footNote.textContent = chosenFiles.size
@@ -529,6 +616,45 @@
       document.body.appendChild(modal);
       go(opts.path);
     });
+  };
+
+  /**
+   * A typed file name with the app's suffix on it, added only if it is missing.
+   * Someone who types "notes.json" meant that, and a name that already ends in
+   * the suffix must not grow a second copy of it -- including when they typed
+   * it in a different case, which is the one a plain endsWith lets through on a
+   * case-insensitive disk.
+   */
+  LK.withExt = function (name, ext) {
+    const raw = String(name || '').trim();
+    if (!raw || !ext) return raw;
+    const e = String(ext).toLowerCase();
+    const low = raw.toLowerCase();
+    if (low.endsWith(e)) return raw;
+    /* A name carried in from an opened file already ends in something.  The
+       tail is replaced, not appended to: a session saved before the suffix
+       existed comes back as "aorta 14.json", and appending would write
+       "aorta 14.json.asfq.json".  Only the extension's own last piece counts,
+       so a ".json" tail goes when the suffix is ".asfq.json" and a name that
+       happens to contain dots keeps them. */
+    const tail = e.slice(e.lastIndexOf('.'));
+    const cut = low.lastIndexOf(tail);
+    if (cut > 0 && cut + tail.length === raw.length) return raw.slice(0, cut) + ext;
+    return raw + ext;
+  };
+
+  /**
+   * Where to save, asked the way every app now asks it: the folder you are
+   * looking at plus the name you type.  Resolves to a full path, or null.
+   *
+   *   LK.save({ ext: '.asfq.json', name: 'aorta 14', exts: ['.asfq.json'] })
+   *
+   * There is no remembered folder behind this and no app-managed list of
+   * saved files: the dialog is the list, and `+ Folder` makes a new one
+   * without leaving for Finder.
+   */
+  LK.save = function (options) {
+    return LK.browse(Object.assign({}, options || {}, { mode: 'save' }));
   };
 
   /**
@@ -784,8 +910,8 @@
       log_x: false, ref_lines: '', legend_loc: 'best', dpi: 300,
       error_style: 'band', markers: 'o', marker_size: 2.6, line_width: 1.0,
       line_styles: '-', join: true, point_size: 3.2,
-      panel_width_mm: 25.4, panel_height_mm: 38.1, panel_cols: 0,   // 1 x 1.5 in
-      scale_x_s: 0, scale_y: 0, family_spread: false, family_colour: 'voltage',
+      panel_width_mm: 20, panel_height_mm: 20, panel_cols: 0,
+      scale_x_s: 0, scale_y: 0, n_pt: 7, family_spread: false, family_colour: 'voltage',
     };
   };
 
@@ -1099,11 +1225,13 @@
         '0 picks a round length')],
       ['scale_y', numberRow('Scale bar, current', 'lk-scaley', { min: '0', step: '5' },
         'In the plotted unit, e.g. 50 for 50 pA/pF. 0 picks a round length.')],
+      ['n_pt', numberRow('n size (pt)', 'lk-npt', { min: '4', max: '12', step: '0.5' },
+        'The n under each panel title')],
       ['family_spread', checkRow("Shade each step's SEM", 'lk-familyspread', false,
         'Off by default: fourteen overlapping bands hide the currents they describe')],
     ]);
     familyBox.insertBefore(
-      el('label', { class: 'row', title: 'One panel, in the unit chosen under Size — your old subplotsize' },
+      el('label', { class: 'row', title: 'The traces of one panel, in the unit chosen under Size; titles go above them' },
         [el('span', { text: 'Panel size' }), el('div', { class: 'pair' }, [
           el('label', {}, [el('span', { class: 'dim', text: 'w' }), panelWField]),
           el('label', {}, [el('span', { class: 'dim', text: 'h' }), panelHField])])]),
@@ -1181,8 +1309,8 @@
       const round = (v) => Math.round(v * places) / places;
       widthField.value = round((state.width_mm || 0) / factor);
       heightField.value = state.height_mm ? round(state.height_mm / factor) : 0;
-      panelWField.value = round((state.panel_width_mm || 25.4) / factor);
-      panelHField.value = round((state.panel_height_mm || 38.1) / factor);
+      panelWField.value = round((state.panel_width_mm || 20) / factor);
+      panelHField.value = round((state.panel_height_mm || 20) / factor);
       axesWField.value = state.axes_width_mm ? round(state.axes_width_mm / factor) : 0;
       axesHField.value = state.axes_height_mm ? round(state.axes_height_mm / factor) : 0;
       barField.value = state.bar_mm ? round(state.bar_mm / factor) : 0;
@@ -1521,6 +1649,21 @@
    * them, Enter.  One column of labels at a time: a two-factor plate is two
    * passes over the same grid, not one cell holding two things.
    */
+  /** Move what is written in one well to another, swapping when both are
+      full.  Every column moves at once, because a well's contents is the
+      whole mixture and not one label at a time: a plate is rearranged by
+      picking a well up and putting it somewhere else, not by retyping it.
+      Returns the same `labels` object, edited in place. */
+  LK.swapWells = function (labels, a, b) {
+    if (a === b) return labels;
+    Object.keys(labels).forEach((name) => {
+      const into = labels[name], from = into[a], to = into[b];
+      if (to === undefined) delete into[a]; else into[a] = to;
+      if (from === undefined) delete into[b]; else into[b] = from;
+    });
+    return labels;
+  };
+
   LK.plateEditor = function (host, options) {
     const opts = Object.assign({ layout: null, wells: [], onchange: null,
       columns: ['variant', 'treatment', 'condition', 'concentration', 'cell_line'],
@@ -1536,6 +1679,7 @@
     let column = Object.keys(layout.labels)[0] || opts.columns[0];
     let adding = true;          // what the drag in progress does to a well
     let dragging = false;       // a press on a well, not yet let go
+    let moveFrom = null;        // the well alt-drag picked up, if any
 
     // The smallest plate that holds every well in use. Nothing in a filename
     // says which of the six it was, but r08c02 rules out the four smaller ones.
@@ -1570,7 +1714,7 @@
     // Select, type, Enter: the label box takes the keyboard as soon as the
     // mouse lets go of the grid.
     const grid = el('div', { class: 'lk-plate',
-      onmouseup: () => { dragging = false; labelBox.focus(); } });
+      onmouseup: () => { dragging = false; moveFrom = null; labelBox.focus(); } });
     const legend = el('div', { class: 'lk-plate-bar' });
     const fileBox = el('input', {
       type: 'file', accept: '.json,application/json', style: { display: 'none' },
@@ -1659,15 +1803,61 @@
           if (adding) picked.add(id); else picked.delete(id);
           node.classList.toggle('sel', adding);
         };
+        // A well with something in it can be picked up and dropped on another.
+        // The browser's own drag carries the label under the pointer and puts
+        // a no-entry cursor where it cannot go, which a hand-rolled one does
+        // not, so it is worth letting the browser run the gesture.
+        const full = said.length > 0;
         grid.appendChild(el('div', {
           class: 'lk-well' + (present.has(id) ? ' has' : '') + (picked.has(id) ? ' sel' : ''),
+          draggable: full ? 'true' : null,
           text: labels[id] || '',
-          title: [id].concat(said, present.has(id) ? [] : [opts.emptyNote]).join(' · '),
+          title: [id].concat(said, present.has(id) ? [] : [opts.emptyNote],
+            said.length ? ['drag it onto another well to move it there'] : [])
+            .join(' · '),
           style: labels[id] ? { background: tint(labels[id]) + '66' } : null,
           // preventDefault: a drag across the grid is a selection of wells,
           // not of the text in them.
+          // A full well is dragged, not swept: the press goes through to the
+          // browser, which starts the drag below -- a preventDefault here
+          // would cancel it before it began. Selecting one is then a click,
+          // and a sweep across several starts on an empty well.
           onmousedown: (e) => {
-            e.preventDefault(); dragging = true; adding = !picked.has(id); mark(e.currentTarget);
+            if (full) return;
+            e.preventDefault();
+            dragging = true; adding = !picked.has(id); mark(e.currentTarget);
+          },
+          // Chrome fires no click after a drag, so this is only the press
+          // that stayed where it was.
+          onclick: () => {
+            if (!full) return;
+            if (picked.has(id)) picked.delete(id); else picked.add(id);
+            paint();
+            labelBox.focus();
+          },
+          ondragstart: (e) => {
+            moveFrom = id;
+            dragging = false;
+            e.dataTransfer.effectAllowed = 'move';
+            e.dataTransfer.setData('text/plain', id);
+          },
+          ondragend: () => { moveFrom = null; paint(); },
+          ondragover: (e) => {
+            if (moveFrom === null || moveFrom === id) return;
+            e.preventDefault();                       // this is where it may land
+            e.dataTransfer.dropEffect = 'move';
+            e.currentTarget.classList.add('drop');
+          },
+          ondragleave: (e) => e.currentTarget.classList.remove('drop'),
+          ondrop: (e) => {
+            e.preventDefault();
+            e.currentTarget.classList.remove('drop');
+            if (moveFrom === null || moveFrom === id) return;
+            LK.swapWells(layout.labels, moveFrom, id);
+            moveFrom = null;
+            picked.clear();
+            paint();
+            changed();
           },
           // Only a drag that began on a well. A press on a well the pointer was
           // not yet known to be over (a redrawn grid, a tap) arrives as an enter
@@ -1704,6 +1894,8 @@
             URL.revokeObjectURL(link.href);
           } }),
         fileBox,
+        el('span', { class: 'dim small',
+          text: 'drag a well to move or swap it' }),
       ]),
       grid, legend,
     ]);
@@ -1727,35 +1919,84 @@
   };
 
   /**
-   * Send to board: an app open in a tab of the figure editor (omnifig) hands
-   * the editor's board its figure, which lands there as live vector.  The
-   * button goes after `exportButton`, the app's Export SVG, looking like it
-   * without its emphasis.  `makeSvg` returns the SVG text as that export
-   * writes it, or a promise of it; nothing returned, nothing sent.  Open on
-   * its own an app has no board, so no button.
+   * Send to board: the figure onto the board of the figure editor (omnifig),
+   * where it lands as live vector.  The button goes after `exportButton`, the
+   * app's Export SVG, looking like it without its emphasis.  `makeSvg` returns
+   * the SVG text as that export writes it, or a promise of it; nothing
+   * returned, nothing sent.
    *
-   * The message is {type: 'board', v: 1, svg}, posted to the framing page's
-   * origin only; the board knows which app sent it by its frame.  The rest
-   * of joining the board is the app's figure-app.json (README).
+   * In an omnifig tab the message is {type: 'board', v: 1, svg, app, key,
+   * update}, posted to the framing page's origin only.  Open on its own, the
+   * app's server sends it (labkit/board.py) to the omnifig running, or to one
+   * it starts -- where the server has that route; without it, no button.
+   *
+   * `opts.key` (a string, or a function returning one or null) links what is
+   * sent: after each redraw `handle.changed(...deps)` sends it again, as an
+   * update omnifig redraws in place, if that key was sent before and the deps
+   * are not the ones it was last drawn from.  No deps, every call sends.
+   * `opts.app` names the app (the page's title by default), `opts.class` the
+   * button's class (the anchor's, unemphasized, by default).  Returns the
+   * handle {place(anchor), changed(...deps)}, placed at once on an anchor.
    */
-  LK.board = function (exportButton, makeSvg) {
-    const origin = global.parent !== global && document.referrer ? new URL(document.referrer).origin : '';
-    if (!origin || !exportButton) return null;
-    const button = el('button', {
-      class: exportButton.className.replace(/\bprimary\b/g, '').trim() || null,
-      title: 'The figure, as the SVG export makes it, onto the board as live vector',
-      text: 'Send to board',
-      onclick: async () => {
-        try {
-          const svg = await makeSvg();
-          if (typeof svg === 'string' && svg) global.parent.postMessage({ type: 'board', v: 1, svg }, origin);
-        } catch (err) {
-          alert('Could not send to the board: ' + (err.message || err));
-        }
+  const boardSent = (() => {
+    try { return new Set(JSON.parse(localStorage.getItem('lk.board.sent') || '[]')); } catch (e) { return new Set(); }
+  })();
+  const boardDrawn = new Map();       // key -> the deps it was last drawn from
+  let boardServer = null;             // whether this page's server can send: a promise, asked once
+  LK.board = function (exportButton, makeSvg, opts) {
+    const o = opts || {};
+    const framed = global.parent !== global && document.referrer ? new URL(document.referrer).origin : '';
+    const keyOf = () => (typeof o.key === 'function' ? o.key() : o.key) || null;
+    const app = o.app || document.title || 'an app';
+    async function deliver(key, update) {
+      const svg = await makeSvg();
+      if (typeof svg !== 'string' || !svg) return;
+      if (framed) global.parent.postMessage({ type: 'board', v: 1, svg, app, key, update }, framed);
+      else await LK.api('/api/board', { body: { svg, key, update } });
+      if (key && !update) {
+        boardSent.add(key);
+        try { localStorage.setItem('lk.board.sent', JSON.stringify(Array.from(boardSent).slice(-500))); } catch (e) { /* not kept: links last this visit */ }
+      }
+    }
+    let timer = null;
+    const handle = {
+      place(anchor) {
+        if (!anchor) return null;
+        if (!framed && !boardServer) boardServer = LK.api('/api/board').then(() => true, () => false);
+        const button = el('button', {
+          class: o.class || (anchor.className || '').replace(/\bprimary\b/g, '').trim() || null,
+          title: 'The figure, as the SVG export makes it, onto the board as live vector' +
+            (o.key ? '; linked, so a change here redraws it there' : ''),
+          text: 'Send to board',
+          onclick: async () => {
+            button.disabled = true;
+            try {
+              await deliver(keyOf(), false);
+              button.textContent = 'Sent';
+              setTimeout(() => { button.textContent = 'Send to board'; }, 1500);
+            } catch (err) {
+              alert('Could not send to the board: ' + (err.message || err));
+            } finally { button.disabled = false; }
+          },
+        });
+        if (!framed) { button.hidden = true; boardServer.then((ok) => { button.hidden = !ok; }); }
+        anchor.after(button);
+        return button;
       },
-    });
-    exportButton.after(button);
-    return button;
+      changed(...deps) {
+        const key = keyOf();
+        if (!key) return;
+        const was = boardDrawn.get(key);
+        boardDrawn.set(key, deps);
+        if (!boardSent.has(key) || (was && deps.length && deps.length === was.length &&
+            deps.every((d, i) => d === was[i]))) return;
+        clearTimeout(timer);
+        // After the redraws stop: a dragged control is one update, not twenty.
+        timer = setTimeout(() => { if (keyOf() === key) deliver(key, true).catch(() => {}); }, 1200);
+      },
+    };
+    handle.place(exportButton);
+    return handle;
   };
 
   global.LK = LK;

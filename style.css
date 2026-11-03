@@ -276,7 +276,7 @@ button.hintact.ghost { background: transparent; color: inherit; text-decoration:
    construct, and the one being read is the one with the dot. */
 .prot-pel { display: flex; gap: 4px; align-items: center; font-size: 12px; color: var(--dim); }
 .prot-pel .pel-c { flex: 1 1 auto; min-width: 0; }
-.prot-pel .pel-g { width: 54px; }
+.prot-pel .pel-g, .prot-pel .pel-r { width: 54px; }
 .prot-pel .dim { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
 .prot-pel.on .pel-c { font-weight: 600; }
 
@@ -302,6 +302,29 @@ button.hintact.ghost { background: transparent; color: inherit; text-decoration:
 }
 .prot-mid { flex: 1 1 auto; min-width: 0; }
 .prot-sub { margin: 0 0 3px 25px; color: var(--dim); font-size: 12px; }
+
+/* The protocol's own table, as a table.  Thirteen columns do not fit a 372px
+   sheet, so it scrolls sideways: a table is read across, and folding its cells
+   into one column each would be shredding it again.  `field-sizing: content`
+   is already on these inputs, so each column is as wide as what is in it. */
+.prot-tab { overflow-x: auto; margin: 4px 0 9px; }
+.prot-tab table { border-collapse: collapse; font-size: 11.5px; }
+.prot-tab th, .prot-tab td {
+  border: 1px solid var(--line); padding: 0; white-space: nowrap; text-align: left;
+}
+.prot-tab th {
+  padding: 2px 5px; font-weight: 600; font-size: 11px; color: var(--dim);
+  background: var(--panel2);
+}
+.prot-tab input { min-width: 3.2em; padding: 2px 4px; border-radius: 0; }
+.prot-tab th:first-child, .prot-tab td:first-child input { min-width: 5.5em; }
+/* A column the sheet works out for itself is a cell and never a field: what was
+   computed should not look like something that was typed. */
+.prot-tab .prot-calc {
+  padding: 2px 5px; color: var(--dim); font-variant-numeric: tabular-nums;
+}
+/* The row a construct is about to land on. */
+.prot-tab tr.prot-on td { background: var(--accent-wash); }
 .prot-free { margin: 0 0 3px 25px; }
 .prot-what.ro { padding: 2px 5px; white-space: pre-wrap; }
 /* Read off the step rather than written in it, so it is quiet and goes nowhere
