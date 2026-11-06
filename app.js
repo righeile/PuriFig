@@ -9333,6 +9333,9 @@ setInterval(autosave, AUTOSAVE_MS);
 pingBackend().then(async () => {
   applySession({ format: SESSION_FORMAT, doc: exampleDoc() }, {});
   await offerRestore();
+  // A session file double-clicked in the Finder (omnifig's open_file.py): once
+  // the server is known to be up, or openSession would ask for a file instead.
+  if (LK.board.onOpen) LK.board.onOpen((open) => open && open.path && openSession(open.path));
 });
 render();
 inspector();
