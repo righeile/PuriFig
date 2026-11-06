@@ -14,7 +14,8 @@
  *   LK.swapWells(labels, a, b)        move a well's contents, or swap two
  *   LK.api(url, opts)                 fetch that throws the server's message
  *   LK.nameMatch(query)              a filter box, as a predicate over a name
- *   LK.board(exportButton, makeSvg, {key})   Send to board, linked, from anywhere
+ *   LK.board(exportButton, makeSvg, {key, base, source, open})   Send to board, linked, from anywhere
+ *   LK.board.onOpen(fn)                              omnifig asks for the view a panel came from
  */
 (function (global) {
   'use strict';
@@ -826,6 +827,16 @@
         + 'column is published: they reduce figures to 85 mm wherever they can.',
       source: 'rupress.org/jgp/pages/fig-vid-guidelines',
     },
+    jci: {
+      label: 'JCI / JCI Insight',
+      widths: { '1 column': 90, '2 columns': 180 },
+      font_pt: 7, dpi: 600, max_height_mm: 172.5,
+      note: 'Helvetica or Arial, 6–8 pt, panel letters uppercase roman (A, B, C). '
+        + '600 ppi for every image, RGB. Whole figure 9–18 cm wide and at most '
+        + '17.25 cm tall. They publish the range, not columns; 9 and 18 cm are its ends. '
+        + 'Read 2026-11-03 from the shared ASCI page, headed JCI Insight.',
+      source: 'jci.org/kiosks/publish/figures',
+    },
   };
 
   /* What a preset sets on top of the journal's own numbers.
@@ -911,7 +922,7 @@
       error_style: 'band', markers: 'o', marker_size: 2.6, line_width: 1.0,
       line_styles: '-', join: true, point_size: 3.2,
       panel_width_mm: 20, panel_height_mm: 20, panel_cols: 0,
-      scale_x_s: 0, scale_y: 0, n_pt: 7, family_spread: false, family_colour: 'voltage',
+      scale_x_s: 0, scale_y: 0, n_pt: 7, family_spread: false, family_colour: 'black',
     };
   };
 
@@ -961,10 +972,11 @@
     const root = el('div', { class: 'plotctl' });
 
     const allKinds = [
-      ['bar', 'Bars', 'Group means. Degrades to "points only" under n = 3.'],
+      ['bar', 'Bars', 'Group means. Degrades to "estimate" under n = 3.'],
       ['box', 'Box', 'Median, quartiles, whiskers.'],
       ['violin', 'Violin', 'The whole distribution. Needs n of about 8 to mean anything.'],
-      ['none', 'Points only', 'The center as a line, nothing else claimed.'],
+      ['hist', 'Histogram', 'Every group overlaid in shared bins, each as a fraction of its own n.'],
+      ['none', 'Estimate', 'The center as a dot on its error bar, as in the pHerret estimate panel.'],
     ];
     const kinds = opts.kinds ? allKinds.filter((k) => opts.kinds.includes(k[0])) : allKinds;
 
@@ -1164,8 +1176,8 @@
     // Folded away: the defaults are publication-ready, and these are for the
     // figure that has to match one already drawn.
     section('Axes', [
-      ['xlim', textRow('x limits', 'lk-xlim', 'min, max', 'Empty leaves the range to the data')],
-      ['ylim', textRow('y limits', 'lk-ylim', 'min, max', 'Empty leaves the range to the data')],
+      ['xlim', textRow('x limits', 'lk-xlim', 'min, max', 'Empty leaves the range to the data; "0," starts at 0 and leaves the other end to it')],
+      ['ylim', textRow('y limits', 'lk-ylim', 'min, max', 'Empty leaves the range to the data; "0," starts at 0 and leaves the other end to it')],
       ['xticks', textRow('x ticks', 'lk-xticks', '0, 20, 40  ·  step 20',
         'Where the ticks go: a list, or "step 20" for regular ones')],
       ['xtick_labels', textRow('x tick text', 'lk-xticklabels', 'WT, KO',
@@ -1182,7 +1194,7 @@
         'A grid competes with the data; none is usually right')],
       ['spines', selectRow('Axis lines', 'lk-spines',
         [['auto', 'As the plot kind wants'], ['lb', 'Left and bottom'], ['box', 'Full box'],
-         ['zero', 'Crossing at zero'], ['none', 'None (scale bars)']],
+         ['zero', 'Crossing at zero'], ['x0', 'x axis at y = 0'], ['none', 'None (scale bars)']],
         'Crossing at zero is the IV convention: the origin is a real place and the reversal potential is read off it')],
       ['log_x', checkRow('Log x axis', 'lk-logx', false, '')],
       ['ref_lines', textRow('Reference lines', 'lk-reflines', '0, -30',
@@ -1200,7 +1212,8 @@
         [['band', 'Shaded band'], ['bars', 'Error bars'], ['both', 'Both'], ['none', 'Nothing']],
         'What the SEM (or SD, or CI) looks like on a curve')],
       ['markers', textRow('Markers', 'lk-markers', 'o, s, ^',
-        'Cycled across the curves, so they stay apart in print: o s ^ v D < > p * x +. Empty draws none.')],
+        'Cycled across the curves, so they stay apart in print: o s ^ v D < > p * x +. Empty draws none. ' +
+        'On a box or bar plot with names like "WT / 0 min", cycled across the second part: o, ^ makes every 0 min a circle and every 3 min a triangle.')],
       ['marker_size', numberRow('Marker size', 'lk-markersize', { min: '0', max: '12', step: '0.2' }, '')],
       ['line_styles', textRow('Line styles', 'lk-linestyles', '-, --, :',
         'Cycled across the curves: - -- -. :')],
@@ -1216,7 +1229,7 @@
     const panelHField = el('input', { type: 'number', min: '0.2', step: '0.1' });
     const familyBox = section('Step families', [
       ['family_colour', selectRow('Color by', 'lk-familycolour',
-        [['voltage', 'Step voltage'], ['black', 'Black only']],
+        [['black', 'Black only'], ['voltage', 'Step voltage']],
         'A ramp across the steps, black, or one color per group — '
         + 'the grouping fields appear here once something is plotted')],
       ['panel_cols', numberRow('Panels per row', 'lk-panelcols', { min: '0', max: '8', step: '1' },
@@ -1253,8 +1266,9 @@
       ['p_test', selectRow('Test', 'lk-ptest',
         [['mann-whitney', 'Mann-Whitney'], ['welch', 'Welch t'],
          ['student', 'Student t'], ['wilcoxon', 'Wilcoxon (paired)'],
-         ['paired-t', 'Paired t']],
-        'Rank tests make no normality assumption; the paired ones need a pairing column')],
+         ['paired-t', 'Paired t'], ['paired-pooled', 'Paired t, pooled variance'],
+         ['ratio-pooled', 'Ratio t, pooled variance']],
+        'Rank tests make no normality assumption; the paired ones need a pairing column. Pooled: one variance from every comparison, on log ratios for "ratio"')],
       ['p_correction', selectRow('Correct', 'lk-pcorr',
         [['fdr_bh', 'FDR (Benjamini–Hochberg)'], ['holm', 'Holm'],
          ['bonferroni', 'Bonferroni'], ['none', 'None']],
@@ -1434,7 +1448,7 @@
       // A paired test is the only one that needs a pairing column, so the box
       // only exists when one is chosen -- an empty field nobody has to wonder
       // about is worse than no field.
-      pairOnRow.hidden = !(state.p_test === 'wilcoxon' || state.p_test === 'paired-t');
+      pairOnRow.hidden = !['wilcoxon', 'paired-t', 'paired-pooled', 'ratio-pooled'].includes(state.p_test);
       buildSwatches();
       preview.textContent = describe(state);
     }
@@ -1609,12 +1623,16 @@
         const colourField = fields.family_colour;
         const current = state.family_colour || colourField.value;
         colourField.innerHTML = '';
-        [['voltage', 'Step voltage'], ['black', 'Black only']].forEach(([v, t]) =>
+        [['black', 'Black only'], ['voltage', 'Step voltage']].forEach(([v, t]) =>
           colourField.appendChild(el('option', { value: v, text: t })));
         (names || []).forEach((name) => colourField.appendChild(
           el('option', { value: name, text: 'By ' + String(name).replace(/_/g, ' ') })));
         colourField.value = current;
-        if (colourField.selectedIndex < 0) colourField.value = 'voltage';
+        if (colourField.selectedIndex < 0) colourField.value = 'black';
+        // Called once a family is on screen, and the controls that shape one --
+        // panels per row, the scale bars -- are all in here. Folded away they
+        // read as absent, so the one section that applies opens itself.
+        familyBox.open = true;
         readFields();
       },
     };
@@ -1934,6 +1952,22 @@
    * sent: after each redraw `handle.changed(...deps)` sends it again, as an
    * update omnifig redraws in place, if that key was sent before and the deps
    * are not the ones it was last drawn from.  No deps, every call sends.
+   * "Sent before" is this browser's memory; `opts.linked(key)` true says the
+   * page knows the key is on the board anyway (a saved session that is).
+   * Neither, the page's server asks omnifig whether it has the key, so a
+   * figure sent from another browser, or by a script, follows too.
+   * `opts.base` (a string or function) is the part of the key that says what
+   * the figure is, the rest being how it is shown -- conditions left out,
+   * groups picked.  A change of the rest then redraws the panel this figure
+   * last went to instead of being a figure of its own, unless omnifig has a
+   * panel of that very view; the view is kept as that panel's, in this
+   * browser, so a reload follows it too.  Send to board starts a panel of the
+   * view as it is.  No base, every key is a figure of its own.
+   * `opts.open` (a value, or a function returning one or a promise of it,
+   * JSON) is how to get back to the figure -- a session, the controls --
+   * kept by omnifig with the panel.  Its "open in" hands it back, the app
+   * opened in its tab, to the function given to `LK.board.onOpen(fn)`, as
+   * fn(open, key).
    * `opts.app` names the app (the page's title by default), `opts.class` the
    * button's class (the anchor's, unemphasized, by default).  Returns the
    * handle {place(anchor), changed(...deps)}, placed at once on an anchor.
@@ -1943,16 +1977,46 @@
   })();
   const boardDrawn = new Map();       // key -> the deps it was last drawn from
   let boardServer = null;             // whether this page's server can send: a promise, asked once
+  const boardAs = () => { try { return JSON.parse(localStorage.getItem('lk.board.as')) || {}; } catch (e) { return {}; } };
+  function setBoardAs(view, key) {    // view key -> the panel's key it redraws; none, its own
+    const as = boardAs();
+    delete as[view];
+    if (key && key !== view) as[view] = key;
+    const keep = Object.keys(as).slice(-300);
+    try { localStorage.setItem('lk.board.as', JSON.stringify(Object.fromEntries(keep.map((k) => [k, as[k]])))); } catch (e) { /* this visit only */ }
+  }
+  function boardHas(key, o) {         // the key on the board: known here, or omnifig says so
+    if (boardSent.has(key) || (o.linked && o.linked(key))) return Promise.resolve(true);
+    return LK.api('/api/board?key=' + encodeURIComponent(key)).then((r) => {
+      if (r && r.linked) boardSent.add(key);
+      return !!(r && r.linked);
+    }, () => false);
+  }
   LK.board = function (exportButton, makeSvg, opts) {
     const o = opts || {};
     const framed = global.parent !== global && document.referrer ? new URL(document.referrer).origin : '';
     const keyOf = () => (typeof o.key === 'function' ? o.key() : o.key) || null;
+    const baseOf = () => (typeof o.base === 'function' ? o.base() : o.base) || null;
     const app = o.app || document.title || 'an app';
+    let linked = null;                // {base, key}: the panel this figure last went to
+    async function target(view) {     // the key a change shown as `view` redraws, or null
+      const base = baseOf();
+      if (await boardHas(view, o)) { linked = { base, key: view }; return view; }
+      const key = base && (boardAs()[view] || (linked && linked.base === base ? linked.key : null));
+      if (!key || !(await boardHas(key, o))) return null;
+      linked = { base, key };
+      setBoardAs(view, key);
+      return key;
+    }
     async function deliver(key, update) {
       const svg = await makeSvg();
       if (typeof svg !== 'string' || !svg) return;
-      if (framed) global.parent.postMessage({ type: 'board', v: 1, svg, app, key, update }, framed);
-      else await LK.api('/api/board', { body: { svg, key, update } });
+      // The source data behind the figure, path(s) on this machine: omnifig
+      // keeps them with the panel and saves them by figure and panel letter.
+      const source = [].concat((typeof o.source === 'function' ? o.source() : o.source) || []).filter(Boolean).map(String);
+      const open = typeof o.open === 'function' ? await Promise.resolve().then(o.open).catch(() => undefined) : o.open;
+      if (framed) global.parent.postMessage({ type: 'board', v: 1, svg, app, key, update, source, open }, framed);
+      else await LK.api('/api/board', { body: { svg, key, update, source, open } });
       if (key && !update) {
         boardSent.add(key);
         try { localStorage.setItem('lk.board.sent', JSON.stringify(Array.from(boardSent).slice(-500))); } catch (e) { /* not kept: links last this visit */ }
@@ -1971,7 +2035,9 @@
           onclick: async () => {
             button.disabled = true;
             try {
-              await deliver(keyOf(), false);
+              const key = keyOf();
+              await deliver(key, false);
+              if (key) { linked = { base: baseOf(), key }; setBoardAs(key, null); }
               button.textContent = 'Sent';
               setTimeout(() => { button.textContent = 'Send to board'; }, 1500);
             } catch (err) {
@@ -1988,16 +2054,55 @@
         if (!key) return;
         const was = boardDrawn.get(key);
         boardDrawn.set(key, deps);
-        if (!boardSent.has(key) || (was && deps.length && deps.length === was.length &&
-            deps.every((d, i) => d === was[i]))) return;
+        if (was && deps.length && deps.length === was.length && deps.every((d, i) => d === was[i])) return;
         clearTimeout(timer);
         // After the redraws stop: a dragged control is one update, not twenty.
-        timer = setTimeout(() => { if (keyOf() === key) deliver(key, true).catch(() => {}); }, 1200);
+        timer = setTimeout(async () => {
+          const to = keyOf() === key && await target(key);
+          if (to && keyOf() === key) deliver(to, true).catch(() => {});
+        }, 1200);
       },
     };
     handle.place(exportButton);
     return handle;
   };
+  // omnifig's "open in": {type: 'board-open', key, open} from the page
+  // framing this one, kept until the app says what to do with it.
+  let boardOpen = null, boardAsked = null;
+  function boardOpened() {
+    if (!boardOpen || !boardAsked) return;
+    const a = boardAsked;
+    boardAsked = null;
+    Promise.resolve(boardOpen(a.open, a.key)).catch((err) => alert('Could not open it: ' + (err.message || err)));
+  }
+  global.addEventListener('message', (ev) => {
+    if (global.parent === global || ev.source !== global.parent || !document.referrer ||
+        ev.origin !== new URL(document.referrer).origin || !ev.data || ev.data.type !== 'board-open') return;
+    boardAsked = ev.data;
+    boardOpened();
+  });
+  LK.board.onOpen = (fn) => { boardOpen = fn; boardOpened(); };
 
   global.LK = LK;
 }(window));
+
+// ── labkit: server lifetime ──────────────────────────────────────────────
+// Holds one connection open to this app's server while any of its pages is,
+// so that closing the last tab or window stops the server (labkit/lifetime.py).
+// One tab at a time holds it -- a browser allows only six connections per
+// server -- and when that tab goes, however it goes, the next one takes over
+// inside the server's grace period; a reload never stops it.  Silent where the
+// server does not know the route (404), in a page opened from a file, and in a
+// WebDriver/Playwright-driven browser: automation keeps its server.
+(function (global) {
+  const nav = global.navigator, loc = global.location;
+  if (!nav || !global.EventSource || nav.webdriver || !loc || !/^https?:$/.test(loc.protocol)) return;
+  const hold = () => new Promise((done) => {
+    const live = new global.EventSource('/__labkit/live');
+    live.onerror = () => { if (live.readyState === 2) done(); };   // refused for good: let it go
+  });
+  if (nav.locks) nav.locks.request('labkit-lifetime', hold);
+  else hold();
+  global.addEventListener('pageshow', (ev) => { if (ev.persisted) hold(); });   // back from bfcache
+}(window));
+// ── end server lifetime ──────────────────────────────────────────────────

@@ -3,7 +3,7 @@
  *     node test_quant.js
  *
  * Intensity is a ratio and needs a loading control and a lane set to 1.  An
- * apparent size is neither: it is read off each blot's own ladder, in its own
+ * apparent molecular weight is neither: it is read off each blot's own ladder, in its own
  * kilodaltons, and dividing it by anything would destroy it.  So what is
  * checked is that the size comes back in kDa, that it is each band's own row
  * and not the row the box was aimed at, and that nothing normalizes it.
@@ -170,7 +170,7 @@ assert.ok(Math.abs(pitch(wide) - 10) < 1e-3, 'a wrong lane set still reads as th
 PF.doc = { nodes: [g1, g2, q] };
 
 // And the axis says what it is.
-assert.ok(/apparent size/.test(quantYLabel(q, D)), quantYLabel(q, D));
+assert.strictEqual(quantYLabel(q, D), 'Apparent molecular weight\n(kDa)');
 
 /* ---- a measured box is a grip ---- */
 
@@ -223,13 +223,13 @@ PF.doc = { nodes: [two, seven, q2, q7] };
 const L2 = quantLayout(q2), L7 = quantLayout(q7);
 assert.strictEqual(L2.D.conditions.length, 2, L2.D.conditions);
 assert.strictEqual(L7.D.conditions.length, 7, L7.D.conditions);
-assert.ok(Math.abs(L2.bw - 3.94) < 1e-9, `two conditions gave a ${L2.bw} mm bar`);
-assert.ok(Math.abs(L7.bw - 3.94) < 1e-9, `seven conditions gave a ${L7.bw} mm bar`);
+assert.ok(Math.abs(L2.bw - 2.79) < 1e-9, `two conditions gave a ${L2.bw} mm bar`);
+assert.ok(Math.abs(L7.bw - 2.79) < 1e-9, `seven conditions gave a ${L7.bw} mm bar`);
 
 // Tight: the panel is only as wide as the bars need, so seven of them is
 // exactly three and a half times two of them.
 assert.ok(Math.abs(q7.w / q2.w - 3.5) < 0.01, `${q2.w} mm for two, ${q7.w} mm for seven`);
-assert.ok(Math.abs(q2.w - 2 * 3.94 / 0.62) < 0.05, q2.w);
+assert.ok(Math.abs(q2.w - 2 * 2.79 / 0.62) < 0.05, q2.w);
 assert.ok(Math.abs(L2.w - q2.w) < 1e-9, 'the drawn width and the panel width disagree');
 
 // Unpinned is the old behavior, kept as the way back: the bar now follows the
@@ -240,12 +240,14 @@ assert.ok(Math.abs(quantLayout(q2o).bw - quantLayout(q7o).bw) > 1,
           'barMm 0 should hand the width back to w');
 assert.strictEqual(q2o.w, 44, 'barMm 0 must not touch the panel width');
 
-/* ---- the value axis is 1.5 in, and it is the plotting area ---- */
+/* ---- the value axis is 0.93 in, and it is the plotting area ---- */
 
-// 30.48 mm = 1.2 in, the same value axis labkit prints and every other app
-// draws.  A new panel gets it whatever its bars turn out to be: the height
-// does not follow the group count the way a stretched panel's does.
-assert.ok(Math.abs(quantNode(0, 0).h - 30.48) < 1e-9,
+// 23.6 mm = 0.93 in, the value axis the lab's current figures draw at, set to
+// match in ephys and pHerret panel by panel.  A new panel gets it whatever its
+// bars turn out to be: the height does not follow the group count the way a
+// stretched panel's does.  (labkit's own `AXES_LENGTH_MM` is 23.6 as well,
+// redefined to match on 2026-11-05.)
+assert.ok(Math.abs(quantNode(0, 0).h - 23.6) < 1e-9,
           `a new quant panel is ${quantNode(0, 0).h} mm tall`);
 
 // And `h` is the plot, not the panel: ymin lands on the bottom of it and ymax
@@ -269,8 +271,8 @@ PF.doc = { nodes: [two, seven, q2, q7] };
 const q7h = panel({ gels: ['s'], horizontal: true, w: 30.48, h: 44 });
 PF.doc = { nodes: [two, seven, q7h] };
 const LH = quantLayout(q7h);
-assert.ok(Math.abs(LH.bw - 3.94) < 1e-9, `across, seven conditions gave a ${LH.bw} mm bar`);
-assert.ok(Math.abs(q7h.h - 7 * 3.94 / 0.62) < 0.05, `across, the height is not the bars': ${q7h.h}`);
+assert.ok(Math.abs(LH.bw - 2.79) < 1e-9, `across, seven conditions gave a ${LH.bw} mm bar`);
+assert.ok(Math.abs(q7h.h - 7 * 2.79 / 0.62) < 0.05, `across, the height is not the bars': ${q7h.h}`);
 assert.strictEqual(q7h.w, 30.48, 'across, the value axis must not be rewritten by the bars');
 // The value axis spans w, and runs left to right from zero.
 assert.ok(Math.abs((LH.Y(LH.ymax) - LH.Y(LH.ymin)) - 30.48) < 1e-9,
@@ -575,6 +577,120 @@ assert.ok(Math.abs(quantData(qsh).summary['mutant'].vals[0] - 10) < 1e-9,
             quantData(pq).summary['wild type'].vals);
   assert.ok(Math.abs(quantData(pq).summary['mutant'].vals[0] - 50) < 0.01,
             'a band with no row of its own lost its size');
+}
+
+
+/* ---- what a p-value is worked out from ----------------------------------
+ *
+ * The arithmetic is labkit's and is checked there; what is checked here is the
+ * question purifig asks it -- which points are paired with which, and what the
+ * control is -- because that is the part a graph gets wrong silently. */
+{
+  // Two blots, each loaded in halves: WT1 WT2 mut | ladder | WT1 WT2 mut.  The
+  // i-th lane of one condition and the i-th of the next are the same half.
+  const half = (id, vals) => {
+    const lanes = [], bands = [], row = { id: id + 'R', name: 'Lamp2', role: 'target' };
+    vals.forEach((v, j) => {
+      const l = { id: `${id}L${j}`, x0: j * 20, x1: j * 20 + 20, label: v[0] };
+      lanes.push(l);
+      bands.push({ id: `${id}B${j}`, row: row.id, lane: l.id, y: 100, h: 20, net: v[1] });
+    });
+    return { id, type: 'gel', title: id, imgH: 400, imgW: lanes.length * 20, lanes,
+             quant: { method: 'border', border: 3, inset: 0.1, rows: [row], bands } };
+  };
+  const g1 = half('b1', [['WT1', 100], ['WT2', 200], ['mut', 600],
+                         ['WT1', 400], ['WT2', 400], ['mut', 1600]]);
+  const g2 = half('b2', [['WT1', 50], ['WT2', 150], ['mut', 400],
+                         ['WT1', 100], ['WT2', 100], ['mut', 600]]);
+  const sq = { ...q, gels: ['b1', 'b2'], readout: 'intensity', useControl: false,
+               norm: 'none', ref: ['WT1', 'WT2'], test: 'ratio-pooled' };
+  PF.doc = { nodes: [g1, g2, sq] };
+  const D = quantData(sq);
+  const I = quantStatInput(sq, D);
+
+  // Two wild-type donors are one control, averaged inside each half -- not two
+  // groups, and not one number per blot either.
+  assert.deepStrictEqual(Object.keys(I.groups), ['WT1 + WT2', 'mut']);
+  assert.deepStrictEqual(I.groups['WT1 + WT2'], [150, 400, 100, 100]);
+  assert.deepStrictEqual(I.groups.mut, [600, 1600, 400, 600]);
+  // Blot and half, in that order: the pairing is "the same half of the same
+  // membrane", and both groups name the halves the same way.
+  assert.deepStrictEqual(I.units['WT1 + WT2'], ['0.0', '0.1', '1.0', '1.1']);
+  assert.deepStrictEqual(I.units.mut, I.units['WT1 + WT2']);
+  assert.strictEqual(I.how, 'WT1 + WT2');
+  assert.deepStrictEqual(I.rest, ['mut']);
+  assert.deepStrictEqual(I.warn, [], 'every condition is loaded the same number of times');
+
+  // Half a control is a different scale, so the half of the gel it is missing
+  // from is dropped rather than divided by what is left of it.
+  const gone = JSON.parse(JSON.stringify(g1));
+  gone.quant.bands = gone.quant.bands.filter(b => b.lane !== 'b1L4');   // the second WT2
+  PF.doc = { nodes: [gone, g2, sq] };
+  const J = quantStatInput(sq, quantData(sq));
+  assert.deepStrictEqual(J.units['WT1 + WT2'], ['0.0', '1.0', '1.1']);
+  assert.deepStrictEqual(J.groups.mut.length, 4, 'the condition itself keeps its lane');
+
+  // A blot that does not run the conditions the same number of times has no
+  // half to pair by, and says so instead of pairing by position in silence.
+  const odd = half('b3', [['WT1', 100], ['WT2', 200], ['mut', 600], ['WT1', 400]]);
+  PF.doc = { nodes: [g1, odd, { ...sq, gels: ['b1', 'b3'] }] };
+  const K = quantStatInput(PF.doc.nodes[2], quantData(PF.doc.nodes[2]));
+  assert.deepStrictEqual(K.warn, ['b3']);
+
+  // Nothing to compare: every condition is a control.
+  PF.doc = { nodes: [g1, g2, sq] };
+  assert.strictEqual(quantStatInput({ ...sq, ref: ['WT1', 'WT2', 'mut'] }, D), null);
+  // And no test named is no question asked.
+  QSTATS.clear(); QSTATS_ASK.clear();
+  assert.strictEqual(quantStats({ ...sq, test: '' }, D), null);
+  assert.strictEqual(QSTATS_ASK.size, 0);
+  const waiting = quantStats(sq, D);
+  assert.ok(waiting.waiting && !waiting.comparisons.length, 'nothing is drawn before the answer');
+  assert.strictEqual(QSTATS_ASK.size, 1, 'the question is left for the pump');
+  const body = [...QSTATS_ASK.values()][0];
+  assert.strictEqual(body.test, 'ratio-pooled');
+  assert.strictEqual(body.correction, 'holm');
+  quantStats(sq, D);
+  assert.strictEqual(QSTATS_ASK.size, 1, 'the same question is not asked twice');
+}
+
+/* ---- the room a p-value takes ----
+ * A label stands inside the panel, so the axis has to end far enough past the
+ * data for it to fit -- and no further, or a number that fitted costs half a
+ * panel of white. */
+{
+  const g = blot('r1', 'blot', [200, 250]);
+  g.quant.bands.forEach(b => { b.net = 1000; });
+  g.quant.bands[1].net = 2000;
+  // A real panel, type sizes and all -- this one is about what is drawn, and a
+  // bare fixture has no font to measure the label in.  `keepSaturated`, because
+  // the mutant band carries a few saturated pixels on purpose and the point
+  // here is the drawing, not the dropping.
+  const rq = Object.assign(quantNode(0, 0), {
+    gels: ['r1'], readout: 'intensity', useControl: false, norm: 'none',
+    ref: ['wild type'], horizontal: true, w: 34, h: 25, keepSaturated: true });
+  PF.doc = { nodes: [g, rq] };
+  const D = quantData(rq);
+  const bare = quantLayout(rq).ymax;
+  QSTATS.clear(); QSTATS_ASK.clear();
+  const withP = { ...rq, test: 'paired-t' };
+  const input = quantStatInput(withP, D);
+  const key = [...(quantStats(withP, D), QSTATS_ASK.keys())][0];
+  QSTATS.set(key, { comparisons: [{ a: 'mutant', b: input.how, p: 0.0312, text: 'p = 0.031',
+                                    n_pairs: 1, test: 'paired t' }], note: '' });
+  const L = quantLayout(withP);
+  const lab = L.groups.find(x => x.c === 'mutant').plabel;
+  assert.ok(lab, 'the condition that is not the control carries the p');
+  assert.strictEqual(lab.text, 'p = 0.031');
+  // The data keeps the whole axis: printing a p moves no bar.
+  assert.strictEqual(L.ymax, bare, `the axis moved to make room (${bare} -> ${L.ymax})`);
+  // And the label stands past the end of it, clear of the spine.
+  assert.ok(L.pAt > rq.x + rq.w - 1e-9, 'the label is anchored at the far end of the axis');
+  assert.ok(L.pGap > 0 && L.pGap < 1.5, `3 pt of air, in mm (${L.pGap})`);
+  const svg = renderQuant(withP);
+  assert.ok(svg.includes('p = 0.031'), 'the label is drawn');
+  const x = +svg.match(/<text x="([\d.]+)"[^>]*>p = 0\.031</)[1];
+  assert.ok(Math.abs(x - (L.pAt + L.pGap)) < 1e-3, `drawn at ${x}, placed at ${L.pAt + L.pGap}`);
 }
 
 console.log('ok');

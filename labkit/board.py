@@ -81,32 +81,45 @@ def _start(port: int) -> str:
     raise RuntimeError(f"omnifig was started on port {port} but did not answer")
 
 
+def _running() -> str | None:
+    """The omnifig running, without starting one."""
+    pinned = os.environ.get("OMNIFIG_URL", "").rstrip("/")
+    if pinned:
+        return pinned if _answers(pinned) else None
+    return next((u for u in (f"http://127.0.0.1:{p}" for p in PORTS) if _answers(u)), None)
+
+
 def find_or_start() -> tuple[str, bool]:
     """The omnifig to send to, and whether it was started just now."""
     with _LOCK:
+        url = _running()
+        if url:
+            return url, False
         pinned = os.environ.get("OMNIFIG_URL", "").rstrip("/")
         if pinned:
-            if _answers(pinned):
-                return pinned, False
             return _start(int(pinned.rsplit(":", 1)[1])), True
-        for port in PORTS:
-            if _answers(f"http://127.0.0.1:{port}"):
-                return f"http://127.0.0.1:{port}", False
         port = next((p for p in PORTS if _free(p)), None)
         if port is None:
             raise RuntimeError("ports 8880-8899 are all taken, and none of them is omnifig")
         return _start(port), True
 
 
-def send(svg: str, app: str, key: str | None = None, update: bool = False) -> dict:
-    """The figure onto omnifig's board; an update only redraws what is linked to ``key``."""
+def send(svg: str, app: str, key: str | None = None, update: bool = False, source=None, open=None) -> dict:
+    """The figure onto omnifig's board; an update only redraws what is linked to ``key``.
+    ``source`` is the source data behind it, a path or a list of them, which
+    omnifig keeps with the panel and saves by figure and panel letter.  A table
+    an app serves rather than writes may be its address on this machine.
+    ``open`` (JSON) is how the app gets back to the figure, kept with the panel."""
     if not isinstance(svg, str) or "<svg" not in svg[:4096]:
         raise ValueError("that is not an SVG")
     if len(svg) > MAX_SVG:
         raise ValueError("the figure is too large to send")
     url, started = find_or_start()
     body = json.dumps({"svg": svg, "app": str(app)[:80], "key": (str(key)[:400] if key else None),
-                       "update": bool(update)}).encode()
+                       "update": bool(update),
+                       "source": [(str(p) if "://" in str(p) else os.path.abspath(os.path.expanduser(str(p))))[:1000]
+                                  for p in ([source] if isinstance(source, str) else source or [])[:20] if p],
+                       "open": open}).encode()
     req = urllib.request.Request(url + "/api/board/inbox", data=body,
                                  headers={"Content-Type": "application/json"})
     try:
@@ -123,6 +136,23 @@ def send(svg: str, app: str, key: str | None = None, update: bool = False) -> di
     return {"url": url, "started": started, "opened": opened, **got}
 
 
+def linked(app: str, key: str) -> bool:
+    """Whether the omnifig running has had ``key`` from ``app`` before, sent from
+    any browser or by a script: then a change to that figure goes to it as an
+    update.  Nothing running, nothing linked; none is started for the asking."""
+    url = _running()
+    if not url or not key:
+        return False
+    req = urllib.request.Request(url + "/api/board/latest", headers={"Content-Type": "application/json"},
+                                 data=json.dumps({"keys": [str(app)[:80] + "\n" + str(key)[:400]]}).encode())
+    try:
+        # ponytail: the answer carries the drawing too; a revs-only answer if that ever weighs.
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return bool(json.loads(r.read()))
+    except (OSError, ValueError):
+        return False
+
+
 def flask_blueprint(app_name: str, url: str = "/api/board"):
     """The same routes as :func:`fastapi_router`, for a Flask app."""
     from flask import Blueprint, jsonify, request
@@ -131,13 +161,15 @@ def flask_blueprint(app_name: str, url: str = "/api/board"):
 
     @blueprint.route(url)
     def _here():
-        return jsonify({"ok": True})
+        key = request.args.get("key")
+        return jsonify({"ok": True, **({"linked": linked(app_name, key)} if key else {})})
 
     @blueprint.route(url, methods=["POST"])
     def _send():
         body = request.get_json(silent=True) or {}
         try:
-            return jsonify(send(body.get("svg"), app_name, body.get("key"), bool(body.get("update"))))
+            return jsonify(send(body.get("svg"), app_name, body.get("key"), bool(body.get("update")), body.get("source"),
+                                body.get("open")))
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
         except RuntimeError as exc:
@@ -147,19 +179,20 @@ def flask_blueprint(app_name: str, url: str = "/api/board"):
 
 
 def fastapi_router(app_name: str, url: str = "/api/board"):
-    """``GET`` says there is a way to the board; ``POST {svg, key, update}`` sends."""
+    """``GET`` says there is a way to the board, and with ``?key=`` whether
+    omnifig has that figure already; ``POST {svg, key, update, source, open}`` sends."""
     from fastapi import APIRouter, Body, HTTPException
 
     router = APIRouter()
 
     @router.get(url)
-    def _here():
-        return {"ok": True}
+    def _here(key: str | None = None):
+        return {"ok": True, **({"linked": linked(app_name, key)} if key else {})}
 
     @router.post(url)
     def _send(body: dict = Body(default={})):
         try:
-            return send(body.get("svg"), app_name, body.get("key"), bool(body.get("update")))
+            return send(body.get("svg"), app_name, body.get("key"), bool(body.get("update")), body.get("source"), body.get("open"))
         except ValueError as exc:
             raise HTTPException(400, str(exc))
         except RuntimeError as exc:

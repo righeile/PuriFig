@@ -668,6 +668,7 @@ function render() {
     renderOverlay();
   $('#zoomLabel').textContent = Math.round(pxPerMm() / (96 / 25.4) * 100) + '%';
   syncEditor();
+  statsPump();                         // a graph that wants a p-value asked while drawing
   if (board) board.changed();          // a linked board copy follows
 }
 
@@ -1601,9 +1602,11 @@ async function buildSupplementary() {
     // fit between them rather than printing them over one another.
     // Each label against its own lane: one badly fitted narrow lane with `A` in
     // it is not a reason to slant a row where everything else fits.
+    // 45 degrees, not steeper: at the 3.5 mm lane pitch the figures use, 30
+    // still overlaps and 60 wastes height above the blot for no more room.
     if (t.lanes.some(l => l.label &&
                      textWmm(l.label, t.labelPt) > (l.x1 - l.x0) * t.h / (t.imgH || 1)))
-      t.labelAngle = 60;
+      t.labelAngle = 45;
     t.x = 14; t.y = 0;
     const k = inkBox(t);          // the title, and a slanted label, hang above t.y
     t.y = r2(y - k.y);
@@ -1788,6 +1791,29 @@ async function api(url, body) {
   const j = await r.json().catch(() => ({ error: r.statusText }));
   if (!r.ok || j.error) throw new Error(j.error || r.statusText);
   return j;
+}
+
+/** Answer the p-values the graphs asked for.
+ *
+ *  `quantStats` leaves a question in `QSTATS_ASK` keyed on the numbers behind
+ *  it; this answers each one once, from labkit, and redraws.  The second render
+ *  finds the answer in the cache and asks nothing, so there is no loop. */
+async function statsPump() {
+  if (!QSTATS_ASK.size) return;
+  const asks = [...QSTATS_ASK];
+  QSTATS_ASK.clear();
+  // Every distinct question ever asked in this session, which is one small
+  // object each; cleared rather than pruned when it has clearly run long.
+  if (QSTATS.size > 240) QSTATS.clear();
+  for (const [key, body] of asks) {
+    try {
+      const r = await api('/api/stats/compare', body);
+      QSTATS.set(key, { comparisons: r.comparisons || [], note: r.note || '', ran: r.test || body.test });
+    } catch (e) {
+      QSTATS.set(key, { comparisons: [], note: '', error: String((e && e.message) || e) });
+    }
+  }
+  render(); inspector();
 }
 
 async function pingBackend() {
@@ -3163,7 +3189,7 @@ function emptyInspector() {
          while this is set, since the height is the lanes'. <b>0</b> gives them back.`
       : `Each blot is as tall as it was dragged, so the same four lanes come out one width
          on one panel and twice that on the next. Set this and they are all drawn to one
-         lane; <b>3.94</b> is what a bar is.`}</div>`}
+         lane; <b>2.79</b> is what a bar is.`}</div>`}
   </div>`;
 }
 
@@ -3552,7 +3578,7 @@ function quantifyInspector(n) {
     const ctrl = rows.find(r => r.role === 'loading control');
     const targets = rows.filter(r => r !== ctrl);
     // How far a band ran is a measurement as much as how much of it there is,
-    // and these are the boxes it is measured in, so the apparent size belongs
+    // and these are the boxes it is measured in, so the apparent molecular weight belongs
     // in this table: off this gel's own ladder, between the two rungs either
     // side, which is the number the quantification panel plots as `size`.
     h += `<div class="qtable"><table><tr><th></th><th>lane</th>` +
@@ -3560,7 +3586,7 @@ function quantifyInspector(n) {
          (ctrl ? targets.map(r => `<th title="${esc(r.name || 'target')} ÷ ${esc(ctrl.name || 'control')}">` +
                                   `${targets.length > 1 ? esc(r.name || 'target') + ' ' : ''}÷ ctrl</th>`).join('') : '') +
          (anyWhole ? `<th title="the target band over the whole of its lane">purity</th>` : '') +
-         (sized ? rows.map(r => `<th title="apparent size of ${esc(r.name || r.role)}, read off this gel's ladder at the row ‘size at’ names">` +
+         (sized ? rows.map(r => `<th title="apparent molecular weight of ${esc(r.name || r.role)}, read off this gel's ladder at the row ‘size at’ names">` +
                                 `${rows.length > 1 ? esc(r.name || r.role) + ' ' : ''}kDa</th>`).join('') : '') +
          `</tr>`;
     gelQuantLanes(n).forEach(x => {
@@ -3585,7 +3611,7 @@ function quantifyInspector(n) {
     h += `</table></div>`;
     if (!sized) {
       h += `<div class="note">Type the ladder's sizes under <b>size standards</b> and each box's
-            apparent size appears here as well, read off the rungs either side of it.</div>`;
+            apparent molecular weight appears here as well, read off the rungs either side of it.</div>`;
     }
     const sat = q.bands.filter(b => b.sat).length;
     if (sat) {
@@ -3618,7 +3644,7 @@ function quantifyInspector(n) {
         window and γ shape the figure and never a number. <b>border</b> takes the background from
         a thin strip just above and below each box in its own lane; <b>profile</b> from a rolling
         minimum down the lane, which copes better with a smear.` +
-       (sized ? ` <b>size at</b> is the row an apparent size is read at — the middle of the box,
+       (sized ? ` <b>size at</b> is the row an apparent molecular weight is read at — the middle of the box,
         or the row the band was found at when the box was placed, which opening the box out to one
         side does not move. They are the same row until a box is reshaped by hand. It changes no
         signal, only where the ladder is read.` : '') + `</div>`;
@@ -3685,7 +3711,7 @@ function quantInspector(n) {
          `</select></div>`;
     h += `<div class="row"><label>measure</label><select data-k="readout" data-t="str">` +
          [['intensity', 'how much — signal'], ['share', 'how much of the protein — % of all its bands'],
-          ['size', 'how far — apparent size in kDa']]
+          ['size', 'how far — apparent molecular weight in kDa']]
            .map(([v, t]) => `<option value="${v}"${(n.readout || 'intensity') === v ? ' selected' : ''}>${t}</option>`).join('') +
          `</select></div>`;
     if (n.readout === 'share') {
@@ -3735,6 +3761,38 @@ function quantInspector(n) {
           <label class="chk">${ctl('bars', BOOL)} bars</label>
           <label class="chk">${ctl('points', BOOL)} points</label>
           <label class="chk">${ctl('box', BOOL)} box</label></div>`;
+    h += `<div class="row"><label>p-values</label><select data-k="test" data-t="str">` +
+         `<option value="">none</option>` +
+         QUANT_TESTS.map(([v, s]) => `<option value="${v}"${n.test === v ? ' selected' : ''}>${esc(s)}</option>`).join('') +
+         `</select></div>`;
+    if (n.test) {
+      const St = quantStats(n, D);
+      if (!St) {
+        h += `<div class="note warn">Nothing to compare — every condition is a control, or none of
+              the others has a point. Tick fewer controls, or measure more lanes.</div>`;
+      } else {
+        h += `<div class="note">Each point is compared with the points beside it on its own blot:
+              the first lane of one condition against the first of another, which on a gel loaded
+              in halves is the same half of the same membrane. Everything is compared with
+              <b>${esc(St.control)}</b>${St.refs.length > 1 ? ', averaged inside each pair' : ''},
+              Holm-corrected across the comparisons in this graph, and the exact p is printed over
+              each bar. The arithmetic is labkit’s <code>stats.compare</code> — the same one the
+              lab’s other figures print.</div>`;
+        if (St.warn.length) {
+          h += `<div class="note warn">On ${esc(St.warn.join(', '))} the conditions are not all
+                loaded the same number of times, so there is no half of the gel to pair by: those
+                lanes are paired in the order they were loaded. One membrane and one exposure
+                still, but not one block.</div>`;
+        }
+        if (St.error) h += `<div class="note warn">No p-value — ${esc(St.error)}.</div>`;
+        else if (St.note) h += `<div class="note">${esc(St.note)}.</div>`;
+        if (n.test === 'mann-whitney') {
+          h += `<div class="note warn">Unpaired, so every lane counts as its own experiment — two
+                lanes of one blot are not that, however they were loaded. Paired is what these
+                graphs are.</div>`;
+        }
+      }
+    }
     if (n.readout !== 'size') {
       h += `<div class="row"><label>saturated</label><label class="chk">${ctl('keepSaturated', BOOL)} keep them</label></div>`;
       if (!n.keepSaturated) h += `<div class="row"><label>allowed %</label>${ctl('satTol', NUM,
@@ -3757,14 +3815,27 @@ function quantInspector(n) {
     h += `</details>`;
 
     h += `<details class="fold" open><summary>the numbers</summary>`;
+    // The p a bar carries belongs beside that bar's own mean, and it is the
+    // string the figure prints -- not one formatted again here, which could
+    // round the other way.
+    const Sn = n.test ? quantStats(n, D) : null;
+    const pAt = {};
+    ((Sn || {}).comparisons || []).forEach(b => {
+      pAt[b.a === Sn.control ? b.b : b.a] = b;
+    });
     h += `<div class="qtable"><table><tr><th>condition</th><th>n</th><th>mean</th>` +
-         `<th>${n.error === 'sem' ? 'SEM' : 'SD'}</th>` +
+         `<th>${n.error === 'sem' ? 'SEM' : 'SD'}</th>` + (Sn ? `<th>p</th>` : '') +
          D.reps.map((rep, i) => `<th title="${esc(rep.name)}">${i + 1}</th>`).join('') + `</tr>`;
     D.conditions.forEach(c => {
       const s = D.summary[c];
       const e = n.error === 'sem' ? s.sem : s.sd;
+      const b = pAt[c];
       h += `<tr><td>${esc(c)}</td><td>${s.n}</td><td>${isFinite(s.mean) ? r3(s.mean) : '—'}</td>` +
            `<td>${isFinite(e) ? r3(e) : ''}</td>` +
+           (Sn ? `<td${b ? ` title="${esc(b.test)}, ${b.n_pairs} pair${b.n_pairs === 1 ? '' : 's'}` +
+                              `${b.message ? ' — ' + esc(b.message) : ''}"`
+                        : ' class="dim" title="the control it is all compared with"'}>` +
+                 `${b ? esc(b.text) : '—'}</td>` : '') +
            D.reps.map(rep => {
              const v = rep.vals[c];
              const row = rep.rows.find(x => x.key === c);
@@ -3817,12 +3888,14 @@ function quantInspector(n) {
   // every one of them or the figure carries two scales -- the other half of
   // the bar-width rule.  Said here because it stays typeable: a panel really
   // does sometimes want to be longer, and this is the number it starts from.
-  if (Math.abs(vLen - 30.48) > 0.05)
+  if (Math.abs(vLen - 23.6) > 0.05)
     h += `<div class="note">The plot is <b>${r2(vLen)} mm</b> of ${across ? 'x' : 'y'}, not the
-          <b>30.48 mm</b> (1.2 in) a new panel gets. Two panels of one figure
+          <b>23.6 mm</b> (0.93 in) a new panel gets. Two panels of one figure
           want the same length, or the same difference looks bigger in one
           of them.</div>`;
   h += row('font pt', 'fontPt', NUM, 'step="0.5"');
+  h += row('axis title pt', 'axisPt', NUM, 'step="0.5"');
+  h += row('p pt', 'pPt', NUM, 'step="0.5"');
   h += `</details>`;
 
   h += `<details class="fold"><summary>bars</summary>`;
@@ -5635,8 +5708,20 @@ function quantCsv(q) {
     out.push([c, s.n, s.mean, s.sd, s.sem].map(cell).join(','));
   });
   out.push('');
+  // The comparisons the figure prints, as it prints them: a p-value on a panel
+  // with no record of what was compared, paired how, and corrected across what
+  // is a number nobody can check.
+  const St = q.test ? quantStats(q, D) : null;
+  if (St && St.comparisons.length) {
+    out.push(['compared', 'with', 'pairs', 'test', 'p', 'p as printed', 'correction'].map(cell).join(','));
+    St.comparisons.forEach(b => out.push(
+      [b.a, b.b, b.n_pairs, b.test, b.p, b.text, q.correct || 'holm'].map(cell).join(',')));
+    out.push(cell('# paired by blot and by position on it — the i-th lane of one condition against ' +
+                  'the i-th of another; ' + (St.note || 'labkit stats.compare')));
+    out.push('');
+  }
   out.push(cell(D.readout === 'size'
-    ? `# apparent size of ${D.target || 'the band'} in kDa, read off each blot's own ladder` +
+    ? `# apparent molecular weight of ${D.target || 'the band'} in kDa, read off each blot's own ladder` +
       ` between the two rungs either side; not normalized`
     : D.readout === 'share'
     ? `# ${D.target || 'the band'} as a percentage of every band measured for the protein` +
@@ -6223,7 +6308,7 @@ function integrityReport() {
     const tag = q.title || `Quantification ${i + 1}`;
     push(`## ${tag}`);
     if (D.readout === 'size') {
-      push(`measures           the apparent size of ${D.target || '(no target row)'}, in kDa`);
+      push(`measures           the apparent molecular weight of ${D.target || '(no target row)'}, in kDa`);
       push(`read from          each blot's own ladder, straight in log(size) between the two ` +
            `rungs either side of the band; not normalized`);
       push(`at the row         ${D.gels.some(g => g.quant.sizeAt === 'band center')
@@ -6396,7 +6481,7 @@ function methodsDraft() {
     const D = quantData(q);
     let s = `**${name(q, i)}.** `;
     if (D.readout === 'size') {
-      s += `The apparent size of ${D.target || 'the band'}, read off each blot's own marker by` +
+      s += `The apparent molecular weight of ${D.target || 'the band'}, read off each blot's own marker by` +
            ` straight-line interpolation in log(size) between the two rungs either side of the band.`;
       if (D.gels.some(g => g.quant.sizeAt === 'band center'))
         s += ` The row read is where each band was found, not the middle of a box that was reshaped by hand.`;
@@ -6674,7 +6759,7 @@ function sourceDataSheet() {
     if (!D.conditions.length) return;
     const td = 'style="padding:2px 8px;border-bottom:1px solid #ddd;text-align:right"';
     h += `<h3 style="font:600 13px sans-serif;color:#111;margin-top:18px">${esc(q.title || `Quantification ${i + 1}`)} —
-          ${D.readout === 'size' ? `apparent size of ${esc(D.target)}, kDa`
+          ${D.readout === 'size' ? `apparent molecular weight of ${esc(D.target)}, kDa`
             : D.readout === 'share' ? `${esc(D.target)}, % of the protein`
             : `${esc(D.target)}${D.control ? ` / ${esc(D.control)}` : ''}${q.norm === 'ref' && D.ref ? `, relative to ${esc(D.ref)}` : ''}`}</h3>
           <table style="border-collapse:collapse;font:12px sans-serif;color:#111">
@@ -9056,20 +9141,27 @@ $('#expSvg').onclick = async () => { await endCrop(); exportSvg(); };
 // omnifig's board (labkit's LK.board), linked: a change here redraws it there.
 // No key while a crop is being dragged, so no redraw sent then finishes it
 // under the hand; the render that ends the crop sends it.
+// Its source data is the original scans, the files on this machine they were
+// opened from: a panel's own, or every panel's for the sheet.
+const scans = (nodes) => [...new Set(nodes.flatMap(n => [n.src, n.marker && n.marker.src])
+  .map(source).filter(s => s && s.path && !/^(blob|data):/.test(s.path)).map(s => s.path))];
 const sheetBoard = LK.board($('#expSvg'), async () => { await endCrop(); return exportSvgString(); },
-  { app: 'purifig', key: () => (mode === 'crop' ? null : doc.sheet + ' ' + doc.boardKey) });
+  { app: 'purifig', key: () => (mode === 'crop' ? null : doc.sheet + ' ' + doc.boardKey),
+    source: () => scans(doc.nodes) });
 // Send panel to board: the one panel selected, by itself and under its own key,
 // so a figure laid out in omnifig can hold this blot or that plot live.  Each
 // panel sent once follows its changes like the sheet does.
 const panelBoards = {};
 const panelBoard = (id) => panelBoards[id] || (panelBoards[id] = LK.board(null, () => panelSvg(id),
-  { app: 'purifig', key: () => (mode === 'crop' || !node(id) ? null : id + ' ' + doc.boardKey) }));
+  { app: 'purifig', key: () => (mode === 'crop' || !node(id) ? null : id + ' ' + doc.boardKey),
+    source: () => scans([node(id)].filter(Boolean)) }));
 const onePanel = () => (sel.size === 1 ? node([...sel][0]) : null);
 const panelSend = LK.board(null, async () => {
   if (!onePanel()) throw new Error('select the one panel to send first');
   await endCrop();
   return panelSvg(onePanel().id);
-}, { app: 'purifig', key: () => (onePanel() ? onePanel().id + ' ' + doc.boardKey : null) })
+}, { app: 'purifig', key: () => (onePanel() ? onePanel().id + ' ' + doc.boardKey : null),
+  source: () => scans([onePanel()].filter(Boolean)) })
   .place($('#expSvg').nextElementSibling);
 if (panelSend) {
   panelSend.textContent = 'Send panel to board';
@@ -9086,11 +9178,21 @@ board = { changed() { sheetBoard.changed(); doc.nodes.forEach(n => panelBoard(n.
 function panelSvg(id) {
   const c = $('#canvas'), live = c.querySelector(`g[data-node="${id}"]`);
   if (!live) return null;
-  const r = live.getBoundingClientRect(), m = c.getScreenCTM().inverse();
+  // Without its title: the figure the panel lands in heads it once, and
+  // "Cathepsin D" over the blot, over the plot and in the figure was three.
+  // The view is cut to what is left, so no empty strip stays where it was.
+  const kept = [...live.children].filter(e => !e.hasAttribute('data-title'))
+    .map(e => e.getBoundingClientRect()).filter(q => q.width || q.height);
+  const r = kept.length ? {
+    left: Math.min(...kept.map(q => q.left)), top: Math.min(...kept.map(q => q.top)),
+    right: Math.max(...kept.map(q => q.right)), bottom: Math.max(...kept.map(q => q.bottom)),
+  } : live.getBoundingClientRect();
+  const m = c.getScreenCTM().inverse();
   const a = new DOMPoint(r.left, r.top).matrixTransform(m);
   const b = new DOMPoint(r.right, r.bottom).matrixTransform(m);
   const svg = new DOMParser().parseFromString(exportSvgString(), 'image/svg+xml').documentElement;
   svg.querySelectorAll(':scope > g[data-node]').forEach(g => { if (g.getAttribute('data-node') !== id) g.remove(); });
+  svg.querySelectorAll('[data-title]').forEach(t => t.remove());
   const edges = svg.querySelector('#le');
   if (edges) edges.remove();
   svg.setAttribute('viewBox', `${r3(a.x)} ${r3(a.y)} ${r3(b.x - a.x)} ${r3(b.y - a.y)}`);

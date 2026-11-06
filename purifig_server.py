@@ -46,6 +46,7 @@ from flask import Flask, Response, jsonify, request, send_from_directory
 from labkit import board as LKBoard
 from labkit import browse as LKB
 from labkit import chemstation
+from labkit import stats as LKStats
 
 import protocol as proto
 import tecan
@@ -2239,6 +2240,48 @@ def image_rf():
     return jsonify({"fit": fit})
 
 
+@app.route("/api/stats/compare", methods=["POST"])
+def stats_compare():
+    """Group comparisons, from labkit, so a figure prints the lab's p-values.
+
+    The browser holds the measurements, `labkit.stats` holds the arithmetic,
+    the correction and the formatting -- `brackets` returns the string that is
+    drawn -- so a figure cannot show a p that the statistics it quotes does
+    not.  Nothing here knows what a blot is: it is given the numbers, which
+    condition each belongs to, and what each is paired with.
+    """
+    body = request.get_json(force=True, silent=True) or {}
+    try:
+        table = LKStats.compare_arrays(
+            {str(k): list(v) for k, v in (body.get("groups") or {}).items()},
+            how=body.get("how") or "all",
+            test=str(body.get("test") or "ratio-pooled"),
+            correction=str(body.get("correction") or "holm"),
+            units=body.get("units") or None,
+        )
+        out = LKStats.brackets(table, style=str(body.get("style") or "auto"))
+        # How many pairs the test actually had, which `brackets` does not carry
+        # and which is the n a reader needs beside a paired p.
+        pairs = {(str(r.group_a), str(r.group_b)): (r.n_pairs, str(r.message or ""))
+                 for r in table.itertuples()}
+        for row in out:
+            n, message = pairs.get((row["a"], row["b"]), (None, ""))
+            row["n_pairs"] = None if n is None else int(n)
+            row["message"] = message
+        # What is true of the whole call -- the pooled df -- said once, and said
+        # here.  A clause only some comparisons carry, such as a pair dropped
+        # for being half there, belongs to those comparisons and stays on them.
+        said = [str(m or "").split("; ") for m in table["message"]] or [[]]
+        shared = [c for c in said[0] if c and all(c in other for other in said)]
+        return jsonify({
+            "comparisons": out,
+            "note": "; ".join(dict.fromkeys(shared)),
+            "test": str(table.iloc[0]["test"]) if len(table) else "",
+        })
+    except Exception as exc:
+        return _fail(exc, 400)
+
+
 @app.route("/api/chrom/open", methods=["POST"])
 def chrom_open():
     body = request.get_json(force=True, silent=True) or {}
@@ -3270,6 +3313,8 @@ if __name__ == "__main__":
     # two copies writing and clearing it would each destroy the other's.
     ap.add_argument("--state", default=os.environ.get("PURIFIG_STATE") or STATE_DIR,
                     help="where the autosave lives (default ~/.purifig)")
+    ap.add_argument("--keep-alive", action="store_true",
+        help="keep running after the last browser window closes")
     a = ap.parse_args()
     STATE_DIR = os.path.abspath(os.path.expanduser(a.state))
     AUTOSAVE = os.path.join(STATE_DIR, "autosave.purifig.json")
@@ -3278,4 +3323,6 @@ if __name__ == "__main__":
     if missing:
         print("missing:  " + ", ".join(missing) +
               "   (pip install -r requirements.txt)", file=sys.stderr)
+    from labkit import lifetime     # stop once the last browser window closes
+    lifetime.flask(app)
     app.run(host="127.0.0.1", port=a.port, threaded=True, debug=False)

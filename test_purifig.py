@@ -1049,6 +1049,64 @@ def test_the_chemstation_reader_reads_its_own_fixture():
     chemstation._check()
 
 
+def test_a_graphs_p_values_are_labkits_own():
+    """The endpoint the quantification panel asks for its p-values.
+
+    What is checked here is the wiring, not the arithmetic -- labkit has its own
+    `check_stats.py` for that.  The printed string has to be the one labkit
+    formats, or a figure and the statistics section quoting it could round
+    different ways; and a paired test has to be given what is paired, or the
+    two groups are matched by row order, which is not a pairing.
+    """
+    from labkit import stats as LKS
+
+    c = S.app.test_client()
+    # Three halves of a gel, the mutant brighter on every one of them.
+    groups = {"WT": [1.0, 2.0, 4.0], "mut": [2.0, 4.0, 8.0], "other": [1.1, 2.2, 3.6]}
+    units = {k: ["b1.0", "b1.1", "b2.0"] for k in groups}
+    r = c.post("/api/stats/compare", json={"groups": groups, "units": units,
+                                           "how": "WT", "test": "ratio-pooled"})
+    assert r.status_code == 200, r.get_data(as_text=True)
+    got = r.get_json()
+    rows = {b["a"]: b for b in got["comparisons"]}
+    assert set(rows) == {"mut", "other"}, got
+    assert all(b["b"] == "WT" for b in rows.values()), "everything is against the control"
+    assert rows["mut"]["n_pairs"] == 3
+
+    # The same call, made directly: same number, same string.
+    table = LKS.compare_arrays(groups, how="WT", test="ratio-pooled",
+                               correction="holm", units=units)
+    direct = {str(row.group_a): row for row in table.itertuples()}
+    assert abs(rows["mut"]["p"] - float(direct["mut"].p_corrected)) < 1e-15
+    assert rows["mut"]["text"] == LKS.format_p(float(direct["mut"].p_corrected))
+    # A ratio of exactly two on every half of every gel, against a scatter
+    # pooled with the other comparison's.
+    assert rows["mut"]["p"] < 1e-3, rows["mut"]
+
+    # The pooled df is said once for the graph, not again on every comparison.
+    assert got["note"] == "4 df, variance pooled over 2 comparison(s)", got["note"]
+
+    # Without what is paired, a paired test refuses rather than matching the
+    # two groups up by the order they happen to be in.
+    bad = c.post("/api/stats/compare", json={"groups": groups, "how": "WT",
+                                             "test": "ratio-pooled"}).get_json()
+    assert "pair_on" in bad.get("error", ""), bad
+    unknown = c.post("/api/stats/compare", json={"groups": groups, "units": units,
+                                                 "test": "vibes"}).get_json()
+    assert "Unknown test" in unknown.get("error", ""), unknown
+
+    # A pair only one side of the comparison has is dropped, and the comparison
+    # that lost it is the one that says so.
+    half = {"WT": [1.0, 2.0, 4.0], "mut": [2.0, 4.0], "other": [1.1, 2.2, 3.6]}
+    ids = {"WT": ["b1.0", "b1.1", "b2.0"], "mut": ["b1.0", "b1.1"],
+           "other": ["b1.0", "b1.1", "b2.0"]}
+    got = c.post("/api/stats/compare", json={"groups": half, "units": ids,
+                                             "how": "WT", "test": "ratio-pooled"}).get_json()
+    rows = {b["a"]: b for b in got["comparisons"]}
+    assert rows["mut"]["n_pairs"] == 2 and rows["other"]["n_pairs"] == 3
+    assert "dropped" in rows["mut"]["message"] and "dropped" not in got["note"], got
+
+
 if __name__ == "__main__":
     for name, fn in sorted(vars().items()):
         if name.startswith("test_"):

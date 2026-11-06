@@ -37,7 +37,7 @@ const gel = open({
   ladder: { on: true, side: 'left', pt: 5.5, lw: 0.22, marks: [] },
   splice: { gap: 1.0, rule: true, ruleMm: 0.3 }, labelAngle: 0,
 });
-assert.deepStrictEqual([gel.labelPt, gel.labelGap, gel.titlePt], [6, 1.2, 6.5],
+assert.deepStrictEqual([gel.labelPt, gel.labelGap, gel.titlePt], [7, 1, 8],
                        'the label sizes a gel is measured by were not filled in');
 assert.deepStrictEqual(gel.quant, { method: 'border', border: 3, inset: 0.05, rows: [], bands: [] },
                        'the quantification block came back incomplete');
@@ -63,6 +63,16 @@ const chrom = open({
 assert.ok(Number.isFinite(chromBottom(chrom)), `chromBottom is ${chromBottom(chrom)}`);
 assert.deepStrictEqual([chrom.fractions.side, chrom.fractions.marks.length], ['bottom', 1],
                        'the fraction bar the file described was not kept');
+
+// The C7 figure type sizes: a new panel has them, and an old quant gains the
+// two sizes it lacked while keeping the font size it stored.
+assert.strictEqual(newNode('gel', 0, 0).ladder.pt, 6, 'kDa marks are not 6 pt');
+const fresh = newNode('quant', 0, 0);
+assert.deepStrictEqual([fresh.fontPt, fresh.axisPt, fresh.pPt, fresh.titlePt], [7, 8, 6, 8], 'quant type sizes');
+const oldQ = { ...fresh, fontPt: 6 };
+delete oldQ.axisPt; delete oldQ.pPt;
+open(oldQ);
+assert.deepStrictEqual([oldQ.fontPt, oldQ.axisPt, oldQ.pPt], [6, 8, 6], 'an old quant was not filled in');
 
 // The brace between them, saved before its label could be nudged.
 const e = { id: 'e1', kind: 'brace', from: 'c1', to: 'g1', label: 'pooled' };

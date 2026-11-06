@@ -49,8 +49,11 @@ function txt(x, y, s, o = {}) {
   const weight = o.bold ? ' font-weight="600"' : '';
   const style = o.italic ? ' font-style="italic"' : '';
   const fill = o.fill || '#000';
+  // A panel's title is marked so a panel sent to the board alone can leave it
+  // out: the figure it lands in heads it once, and the plot repeats nothing.
+  const role = o.title ? ' data-title="1"' : '';
   return `<text x="${r3(x)}" y="${r3(y)}" font-family="${FONT}" font-size="${r3(pt * PT)}"` +
-         ` text-anchor="${a}" fill="${fill}"${weight}${style}${rot}>${esc(s)}</text>`;
+         ` text-anchor="${a}" fill="${fill}"${weight}${style}${rot}${role}>${esc(s)}</text>`;
 }
 
 /** Multi-line text, lines stacked downward from y. */
@@ -116,12 +119,12 @@ function gelNode(x, y) {
     levels: { black: 0, white: 65535, gamma: 1, invert: false },
     href: null, imgW: 0, imgH: 0,
     leanL: 0, leanR: 0,                  // lane drift at each edge, px across the height
-    lanes: [], ladder: { on: true, side: 'left', pt: 5.5, lw: 0.22, marks: [] }, fit: null,
+    lanes: [], ladder: { on: true, side: 'left', pt: 6, lw: 0.22, marks: [] }, fit: null,
     bands: [],
     splice: { gap: 1.0, rule: true, ruleMm: 0.3 },
-    labelPt: 6, labelAngle: 0, labelGap: 1.2, showNumbers: false,
+    labelPt: 7, labelAngle: 0, labelGap: 1, showNumbers: false,
     frame: true, framePt: 0.25,
-    title: '', titlePt: 6.5,
+    title: '', titlePt: 8,
     // what the panel *is*, which the caption and the manifest read
     kind: 'SDS-PAGE',          // SDS-PAGE | native PAGE | western blot | ...
     acrylamide: '', reducing: true,
@@ -668,7 +671,7 @@ function renderGel(n) {
   });
 
   if (n.title) {
-    out += txt(n.x + L.totalW / 2, gelTitleY(n), n.title, { pt: n.titlePt, bold: true });
+    out += txt(n.x + L.totalW / 2, gelTitleY(n), n.title, { pt: n.titlePt, bold: true, title: true });
   }
   return out;
 }
@@ -1076,7 +1079,7 @@ function quantResize(y0, h0, d, end, imgH) {
   return { y: r2(y0 + (h - h0) / 2 * (end ? 1 : -1)), h };
 }
 
-/** The crop row a band's apparent size is read at: the middle of its box, or --
+/** The crop row a band's apparent molecular weight is read at: the middle of its box, or --
  *  where the blot says so -- the row the band was found at when the box was
  *  placed.  They are the same row the moment a box is clicked, since the search
  *  centers the box between the band's two ends; they part company only when the
@@ -1779,7 +1782,7 @@ function renderChrom(n) {
   const shown = chromShadedFractions(n);
   if (n.title) {
     out += txt(n.x, chromTop(n, pt) - 0.9, n.title,
-               { pt: n.titlePt, bold: true, anchor: 'start' });
+               { pt: n.titlePt, bold: true, anchor: 'start', title: true });
   }
   if (fr.on && fr.pooled) {
     const a = S.X(fr.pooled[0]), b = S.X(fr.pooled[1]);
@@ -2114,7 +2117,7 @@ function drawTable(n, cols, rows) {
   const scale = n.w / (totalW || 1);
   let out = '';
   let y = n.y;
-  if (n.title) { out += txt(n.x, y, n.title, { pt: n.headPt, bold: true, anchor: 'start' }); y += lh; }
+  if (n.title) { out += txt(n.x, y, n.title, { pt: n.headPt, bold: true, anchor: 'start', title: true }); y += lh; }
 
   const headLines = Math.max(...cols.map(c => String(c.label).split('\n').length));
   const headH = headLines * n.headPt * PT * 1.15 + n.pad;
@@ -2231,7 +2234,7 @@ function renderNanodrop(n) {
 
   let out = '';
   let top = n.y;
-  if (n.title) { out += txt(n.x, top, n.title, { pt: n.headPt, bold: true, anchor: 'start' }); top += n.rowMm; }
+  if (n.title) { out += txt(n.x, top, n.title, { pt: n.headPt, bold: true, anchor: 'start', title: true }); top += n.rowMm; }
   if (n.header) {
     out += txt(n.x, top, nanodropHeadline(n), { pt: n.fontPt * 0.88, anchor: 'start', fill: '#767676' });
     top += n.rowMm * 0.9;
@@ -2262,15 +2265,18 @@ function renderNanodrop(n) {
 
 function quantNode(x, y) {
   return {
-    // `h` is the plotting area, labels outside it.  30.48 mm is 1.2 in, the
-    // same value axis labkit prints (`AXES_LENGTH_MM`) and every other app
-    // draws, taken from the lab's own ephys notebook -- `figsize=(0.25*18,
-    // 1.2)` in `ClC-7 2025.ipynb`.  Whatever the number, it is the SAME number
-    // in every panel -- a plot stretched to its panel draws the same
-    // difference tall here and short in the next one, and a reader comparing
-    // the two is comparing two scales.  `w` comes from the bar width, see
-    // `quantFit`.
-    id: uid(), type: 'quant', x: r2(x), y: r2(y), w: 44, h: 30.48,
+    // `h` is the plotting area, labels outside it.  23.6 mm is 0.93 in, the
+    // value axis the lab's current figures draw at -- the ClC-7 2025 figure
+    // sets the same length in ephys and pHerret, panel by panel, and labkit's
+    // `AXES_LENGTH_MM` was redefined to 23.6 to match on 2026-11-05.  Within
+    // one figure these have to be the same number, wherever a panel comes
+    // from.  And whatever the number, it is the
+    // SAME number in every panel -- a plot stretched to its panel draws the
+    // same difference tall here and short in the next one, and a reader
+    // comparing the two is comparing two scales.  Both axes start at it:
+    // `quantFit` overwrites whichever one the conditions pin (`w` upright,
+    // `h` across) and leaves the value axis alone.
+    id: uid(), type: 'quant', x: r2(x), y: r2(y), w: 23.6, h: 23.6,
     gels: [],                  // the replicate blots, in order
     // Where each replicate's loading control was measured, when it was not
     // measured on the blot itself.  A western's loading control is a second
@@ -2282,7 +2288,7 @@ function quantNode(x, y) {
     // What is compared across the lanes: how much of the band there is, or how
     // far down the gel it ran.  A shift is a result in its own right — a
     // cleaved, degraded or differently glycosylated protein is the same protein
-    // at another apparent size — and it is measured off the same boxes.
+    // at another apparent molecular weight — and it is measured off the same boxes.
     // `share` is the third: how much of the protein is in this band, with
     // every target row on the blot adding up to 100% in each lane.  A protein
     // that runs as a precursor, an intermediate and a mature form is measured
@@ -2301,13 +2307,20 @@ function quantNode(x, y) {
     keepSaturated: false,      // a clipped band gives a ratio that is wrong
     satTol: 2,                 // ... but a pixel or two at the limit does not
     error: 'sd',               // sd | sem
+    // '' is no p-value at all, which is what a graph says until it is asked.
+    // A name from `QUANT_TESTS` prints one over every condition but the
+    // control -- see `quantStatInput` for what is paired with what.
+    test: '',
     bars: true, points: true,
-    title: '', titlePt: 6.5, fontPt: 6.5, axisMm: 0.25, tickMm: 1.1,
+    // Type as the C7 figures set it: tick numbers and condition names 7 pt,
+    // the axis title and the title 8 pt, the p-values 6 pt.
+    title: '', titlePt: 8, fontPt: 7, axisPt: 8, pPt: 6, axisMm: 0.25, tickMm: 1.1,
     ylabel: '', barFill: '#c8c8c8',
     // One bar is the same width on the page whatever the condition count, and
-    // the panel is only as wide as the bars need -- see `quantFit`.  0 hands
-    // the width back to `w`, which is how this drew before.
-    barMm: 3.94,
+    // the panel is only as wide as the bars need -- see `quantFit`.  2.79 mm
+    // puts a condition at 4.5 mm, the pitch the lab's current figures use.
+    // 0 hands the width back to `w`, which is how this drew before.
+    barMm: 2.79,
     // '' is the single `barFill` this panel has always used.  A palette name
     // from LK.PALETTES colors the conditions in order instead, the same wheel
     // the exported matplotlib figures use.
@@ -2673,9 +2686,87 @@ function quantRefs(q, order) {
   return want.length ? want : (order[0] ? [order[0]] : []);
 }
 
+/** The tests a graph may print, in the order they are offered. */
+const QUANT_TESTS = [
+  ['ratio-pooled', 'paired, on ratios — one scatter for the whole graph'],
+  ['paired-pooled', 'paired, on differences — one scatter for the whole graph'],
+  ['paired-t', 'paired t — each comparison on its own scatter'],
+  ['wilcoxon', 'Wilcoxon signed rank — paired, on ranks'],
+  ['mann-whitney', 'Mann-Whitney — unpaired, on ranks'],
+];
+
+/** What a p-value is worked out from: each condition's points, keyed by where
+ *  on its blot each one was measured.
+ *
+ *  A blot runs every condition once per half of the gel -- four dishes, the
+ *  ladder lane, four more -- so the i-th lane of one condition and the i-th of
+ *  the next were loaded, transferred and exposed together.  That is the pair.
+ *  Lanes of one blot are not independent of each other, which this panel says
+ *  in words already; pairing them is answering it rather than ignoring it.
+ *
+ *  The control is the condition set the graph is relative to, averaged inside
+ *  each pair where there is more than one of them -- two wild-type donors are
+ *  one control -- and a pair missing any of them is dropped, for the reason
+ *  `quantData` drops a blot missing one: half a control is a different scale. */
+function quantStatInput(q, D) {
+  const refs = quantRefs(q, D.conditions);
+  if (!refs.length || refs.length >= D.conditions.length) return null;
+  const at = {}, lanes = {};
+  D.conditions.forEach(c => {
+    at[c] = {};
+    ((D.summary[c] || {}).pts || []).forEach(p => {
+      at[c][`${p.r}.${p.i}`] = p.v;
+      (lanes[p.r] = lanes[p.r] || {})[c] = p.m;
+    });
+  });
+  const units = [...new Set(D.conditions.flatMap(c => Object.keys(at[c])))].sort();
+  const control = refs.join(' + ');
+  const groups = {}, ids = {};
+  const put = (g, u, v) => { (groups[g] = groups[g] || []).push(v); (ids[g] = ids[g] || []).push(u); };
+  units.forEach(u => {
+    const vs = refs.map(c => at[c][u]).filter(v => isFinite(v));
+    if (vs.length === refs.length) put(control, u, mean(vs));
+  });
+  const rest = D.conditions.filter(c => !refs.includes(c) && Object.keys(at[c]).length);
+  rest.forEach(c => units.forEach(u => { if (isFinite(at[c][u])) put(c, u, at[c][u]); }));
+  if (!groups[control] || !rest.length) return null;
+  // Pairing by position only lines the halves of a gel up while every condition
+  // is on it the same number of times.  Where one is loaded three times and
+  // another twice there is no half to speak of, and what is paired is the order
+  // the lanes were loaded in -- still one membrane and one exposure, but not a
+  // block, so it is said out loud rather than drawn as though it were.
+  const warn = Object.entries(lanes)
+    .filter(([, m]) => new Set(Object.values(m)).size > 1)
+    .map(([r]) => (D.reps[r] || {}).name || `blot ${+r + 1}`);
+  return { groups, units: ids, how: control, control, refs, rest, warn };
+}
+
+/* The p-values a graph asked for.  The arithmetic is labkit's, over the
+   network, and the renderer is synchronous and runs on every frame -- so what
+   it can do is read an answer that has arrived and leave a question for one
+   that has not.  `statsPump` in app.js answers them and redraws. */
+const QSTATS = new Map(), QSTATS_ASK = new Map();
+
+/** This graph's comparisons, or null while there are none to show. */
+function quantStats(q, D) {
+  if (!q.test || !D.conditions.length) return null;
+  const input = quantStatInput(q, D);
+  if (!input) return null;
+  const body = { groups: input.groups, units: input.units, how: input.how,
+                 test: q.test, correction: q.correct || 'holm' };
+  // Keyed on the numbers themselves, so re-measuring a band asks again and
+  // moving the panel across the page does not.
+  const key = JSON.stringify(body);
+  const got = QSTATS.get(key);
+  if (!got && !QSTATS_ASK.has(key)) QSTATS_ASK.set(key, body);
+  return got ? { ...input, ...got } : { ...input, comparisons: [], waiting: true };
+}
+
 function quantYLabel(q, D) {
   if (q.ylabel) return q.ylabel;
-  if (D.readout === 'size') return `apparent size of ${D.target || 'the band'}\n(kDa)`;
+  // The band is already named by the panel's title and by the blot above it, so
+  // the axis says the readout and its unit and nothing else (user, 2026-11-04).
+  if (D.readout === 'size') return 'Apparent molecular weight\n(kDa)';
   if (D.readout === 'share') return `${D.target || 'the band'}\n(% of total)`;
   const what = D.control ? `${D.target || 'target'} / ${D.control}` : (D.target || 'signal');
   const rel = q.norm === 'ref' && D.ref ? `relative to ${D.ref}`
@@ -2691,15 +2782,20 @@ const fmtTick = v => String(r3(v)).replace(/^-0$/, '0');
  *  exported figure come out different sizes, silently and by a constant
  *  factor. */
 const QUANT_FILL = 0.62;
-// 3.94 mm a bar puts a category at 6.35 mm, which is 0.25 in -- the pitch the
-// lab's ephys notebook draws at, and what labkit's `PlotSpec.bar_mm` prints.
-// Keep the two equal or a purifig bar and the same bar exported come out
-// different sizes, silently and by a constant factor.
+// The bar moved with it: 2.79 mm puts a condition at 4.5 mm, which is what
+// the lab's current figures draw at in ephys and pHerret too, and labkit's
+// `PlotSpec.bar_mm` was redefined to 2.79 on 2026-11-05 (`CATEGORY_MM` 4.5).
+// Keep them set to the same number within one figure, or a purifig bar and
+// the same bar exported come out different sizes, silently and by a constant
+// factor.  `QUANT_FILL` is not that kind of number: it is a fraction of a
+// category, and it must stay equal to labkit's `BAR_WIDTH`, 0.62.
 
-/** The printed width of one bar, in mm.  Missing means 3.94, not 0: a panel
- *  saved before this existed gets the fixed width too, which is the point.
+/** The printed width of one bar, in mm.  Missing means the default, not 0: a
+ *  panel saved before this existed gets the fixed width too, which is the
+ *  point -- and it gets the current one, so a figure from before reopens at
+ *  the pitch today's are drawn at instead of keeping one nobody uses.
  *  An explicit 0 is the way back to stretching across `w`. */
-const quantBarMm = q => (q.barMm === undefined ? 3.94 : Math.max(0, q.barMm));
+const quantBarMm = q => (q.barMm === undefined ? 2.79 : Math.max(0, q.barMm));
 
 /** Pin the panel's width to its bars.
  *
@@ -2753,7 +2849,7 @@ function quantile(sorted, f) {
  *  box both read this, so what is drawn and what is measured for alignment
  *  cannot drift apart. */
 function quantLayout(q) {
-  const D = quantData(q), pt = q.fontPt;
+  const D = quantData(q), pt = q.fontPt, ap = q.axisPt ?? pt, pp = q.pPt ?? pt;
   const err = s => (q.error === 'sem' ? s.sem : s.sd);
   // Zero is the floor of an amount, and the floor of a size is the smallest one
   // measured: starting a kilodalton axis at zero hides the five that matter.
@@ -2770,11 +2866,29 @@ function quantLayout(q) {
   });
   if (!isFinite(lo)) lo = 0;
   if (!(hi > lo)) hi = lo + 1;
-  const t0 = niceTicks(lo, hi, 4);
-  const step = t0.length > 1 ? t0[1] - t0[0] : (hi - lo) / 4;
   // The axis ends on a tick, so its top is labeled rather than trailing off.
-  const ymax = Math.ceil(hi / step - 1e-9) * step;
-  const ymin = lo < 0 || D.readout === 'size' ? Math.floor(lo / step + 1e-9) * step : 0;
+  const axis = top => {
+    const t = niceTicks(lo, top, 4);
+    const st = t.length > 1 ? t[1] - t[0] : ((top - lo) / 4 || 1);
+    return { ymax: Math.ceil(top / st - 1e-9) * st,
+             ymin: lo < 0 || D.readout === 'size' ? Math.floor(lo / st + 1e-9) * st : 0 };
+  };
+  const { ymax, ymin } = axis(hi);
+  // The p-values this graph prints.  They stand past the far end of the axis,
+  // not over the data -- `outside` in labkit's `plots.annotate_p`, which this
+  // follows down to the 3 pt of air, and for the reason it gives: the panel's
+  // size on the page is typed, so room made inside it comes out of the data.
+  // An axis stretched to hold "p = 2.3e-4" beside a horizontal bar spends a
+  // third of its width on the number (user, 2026-11-04).  Nothing clips a
+  // panel, so what runs past is drawn; what it runs into is the gutter the
+  // figure already leaves between panels.
+  const St = quantStats(q, D);
+  const pLab = {};
+  ((St || {}).comparisons || []).forEach(b => {
+    const c = b.a === St.control ? b.b : b.a;
+    if (D.summary[c] && D.summary[c].n && b.text) pLab[c] = b;
+  });
+  const pGap = 3 * PT;
   // Across or up: one value mapper either way, so everything below places a
   // number on the value axis and a condition on the other one without caring
   // which of the two is horizontal.
@@ -2810,12 +2924,12 @@ function quantLayout(q) {
   });
   const tickW = Math.max(0, ...ticks.map(v => textWmm(fmtTick(v), pt)));
   const ylines = quantYLabel(q, D).split('\n');
-  const lh = pt * PT * 1.15;
-  const yx = q.x - q.tickMm - 0.5 - tickW - 1.2 - pt * PT * DESC;
+  const lh = ap * PT * 1.15;
+  const yx = q.x - q.tickMm - 0.5 - tickW - 1.2 - ap * PT * DESC;
   // Up: turned on its side, left of the tick numbers.  Across: plain type under
   // them, because the value axis is the horizontal one now.
   const ylabel = hz
-    ? { lines: ylines, x: q.x + q.w / 2, y: q.y + q.h + q.tickMm + pt * PT * 2.1, lh, rotate: 0 }
+    ? { lines: ylines, x: q.x + q.w / 2, y: q.y + q.h + q.tickMm + pt * PT * 1.15 + ap * PT * 0.95, lh, rotate: 0 }
     : { lines: ylines, x: yx, y: q.y + q.h / 2, lh, rotate: -90 };
 
   const R = D.reps.length;
@@ -2852,6 +2966,11 @@ function quantLayout(q) {
       box: s.n && q.box ? boxOf(s.vals, Y, cx, bw, hz) : null,
       mean,
       err: s.n > 1 && isFinite(e) && !q.box ? { y0: Y(s.mean - e), y1: Y(s.mean + e) } : null,
+      // The number over the data it is about.  Nothing is drawn to join them:
+      // every comparison in this graph shares one control, so a bracket would
+      // be a line from each bar to the same bar -- which is what labkit's own
+      // annotation leaves out for the same reason.
+      plabel: pLab[c] && s.n ? pLab[c] : null,
       pts: q.points ? s.pts.map(p => {
         // Spread by blot, so the same blot is the same place under every
         // condition, and again within the blot for lanes of one condition.
@@ -2862,7 +2981,7 @@ function quantLayout(q) {
       }) : [],
     };
   });
-  return { D, pt, Y, hz, ymin, ymax, ticks, cticks, slot, bw, w, xlabels, tilt, ylabel, groups };
+  return { D, pt, ap, pp, Y, hz, ymin, ymax, ticks, cticks, slot, bw, w, xlabels, tilt, ylabel, groups, pGap, pAt: Y(ymax) };
 }
 
 /** One point of the graph, shaped by which blot it came from.
@@ -2905,7 +3024,7 @@ const markShapeName = r => MARK_SHAPES[((r % MARK_SHAPES.length) + MARK_SHAPES.l
                             .replace('down', 'inverted triangle');
 
 function renderQuant(q) {
-  const Lq = quantLayout(q), { D, pt, Y } = Lq;
+  const Lq = quantLayout(q), { D, pt, ap, pp, Y } = Lq;
   let out = '';
   if (!D.gels.length || !D.conditions.length) {
     out += rect(q.x, q.y, q.w, q.h, { fill: '#f7f7f7', stroke: '#bbb', dash: '1.5 1.2' });
@@ -2914,7 +3033,7 @@ function renderQuant(q) {
       : ['no blots yet —', 'add them in the inspector'], { pt: 5.5, fill: '#888' });
     return out;
   }
-  if (q.title) out += txt(q.x, q.y - 2.2, q.title, { pt: q.titlePt, bold: true, anchor: 'start' });
+  if (q.title) out += txt(q.x, q.y - 2.2, q.title, { pt: q.titlePt, bold: true, anchor: 'start', title: true });
 
   const hz = Lq.hz;
   Lq.groups.forEach(g => {
@@ -2944,6 +3063,15 @@ function renderQuant(q) {
     // same series as the bar they sit on, and the outline keeps them
     // countable both against the bar and against each other.
     g.pts.forEach(p => out += markGlyph(p.r, p.x, p.y, 0.9503, g.fill, GLYPH_EDGE));
+    if (g.plabel) {
+      // Black for a result, labkit's `muted` for one that is not: a p a reader
+      // has to weigh should not be in the same ink as the data.  Turned, the
+      // label reads upwards along its own category -- "p = 2.3e-4" is wider
+      // than a category is, and across the top they would run into each other.
+      const o = { pt: pp, anchor: 'start', fill: g.plabel.significant ? '#000' : '#6b7480' };
+      out += hz ? txt(Lq.pAt + Lq.pGap, g.cx + pp * PT * 0.35, g.plabel.text, o)
+                : txt(g.cx + pp * PT * 0.35, Lq.pAt - Lq.pGap, g.plabel.text, { ...o, rotate: -90 });
+    }
     if (g.err) {
       const cap = Lq.bw * 0.18;
       if (hz) {
@@ -2983,8 +3111,8 @@ function renderQuant(q) {
   });
   const yl = Lq.ylabel;
   yl.lines.forEach((s, i) => {
-    if (yl.rotate) out += txt(yl.x - (yl.lines.length - 1 - i) * yl.lh, yl.y, s, { pt, rotate: -90 });
-    else out += txt(yl.x, yl.y + i * yl.lh, s, { pt });
+    if (yl.rotate) out += txt(yl.x - (yl.lines.length - 1 - i) * yl.lh, yl.y, s, { pt: ap, rotate: -90 });
+    else out += txt(yl.x, yl.y + i * yl.lh, s, { pt: ap });
   });
   return out;
 }
@@ -3207,7 +3335,7 @@ function renderConstruct(n) {
 
   let out = '';
   if (L.titleY !== null)
-    out += txt(n.x, L.titleY, n.title, { pt: n.headPt, bold: true, anchor: 'start' });
+    out += txt(n.x, L.titleY, n.title, { pt: n.headPt, bold: true, anchor: 'start', title: true });
 
   if (!L.total)
     return out + rect(n.x, L.barY, n.w, n.barMm, { stroke: '#b9b9b9', strokeMm: 0.2, dash: '1.2 1' });
@@ -3587,7 +3715,7 @@ function chromInkBox(n) {
 }
 
 function quantInkBox(q) {
-  const Lq = quantLayout(q), pt = Lq.pt;
+  const Lq = quantLayout(q), { pt, ap, pp } = Lq;
   let b = bx(q.x, q.y, q.x + q.w, q.y + q.h);
   if (!Lq.D.gels.length || !Lq.D.conditions.length) return b;
   Lq.ticks.forEach(v => {
@@ -3603,9 +3731,25 @@ function quantInkBox(q) {
   });
   const yl = Lq.ylabel;
   yl.lines.forEach((s, i) => {
-    if (!yl.rotate) { b = growText(b, yl.x, yl.y + i * yl.lh, s, pt, 'middle'); return; }
-    const x = yl.x - (yl.lines.length - 1 - i) * yl.lh, half = textWmm(s, pt) / 2;
-    b = boxUnion(b, bx(x - pt * PT * ASC, yl.y - half, x + pt * PT * DESC, yl.y + half));
+    if (!yl.rotate) { b = growText(b, yl.x, yl.y + i * yl.lh, s, ap, 'middle'); return; }
+    const x = yl.x - (yl.lines.length - 1 - i) * yl.lh, half = textWmm(s, ap) / 2;
+    b = boxUnion(b, bx(x - ap * PT * ASC, yl.y - half, x + ap * PT * DESC, yl.y + half));
+  });
+  // A p-value stands outside the axis, which makes it exactly the kind of
+  // overhang this box is for -- what runs past is what collides.  Every
+  // alignment, snap and overlap warning reads this one box, so saying it here
+  // is saying it everywhere.
+  Lq.groups.forEach(g => {
+    if (!g.plabel) return;
+    if (Lq.hz) {
+      b = growText(b, Lq.pAt + Lq.pGap, g.cx + pp * PT * 0.35, g.plabel.text, pp, 'start');
+      return;
+    }
+    // Turned, it reads upwards from its anchor: the glyphs run along -y and
+    // the line's own depth across x.
+    const run = textWmm(g.plabel.text, pp), x = g.cx + pp * PT * 0.35;
+    b = boxUnion(b, bx(x - pp * PT * ASC, Lq.pAt - Lq.pGap - run,
+                       x + pp * PT * DESC, Lq.pAt - Lq.pGap));
   });
   if (q.title) b = growText(b, q.x, q.y - 2.2, q.title, q.titlePt, 'start', true);
   return b;
